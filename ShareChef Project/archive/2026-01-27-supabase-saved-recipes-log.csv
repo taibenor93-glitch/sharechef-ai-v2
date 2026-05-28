@@ -1,0 +1,6 @@
+column_name,data_type
+id,timestamp with time zone
+title,text
+ingredients,text
+steps,text
+created_at,timestamp with time zone

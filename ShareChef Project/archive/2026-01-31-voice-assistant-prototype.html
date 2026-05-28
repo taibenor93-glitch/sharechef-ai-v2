@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShareChef Voice Assistant - Working Version</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        h1 {
+            color: #333;
+            font-size: 32px;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .mic-button {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #ff6b6b, #ee5a6f);
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 30px;
+            transition: all 0.3s ease;
+            box-shadow: 0 10px 30px rgba(238, 90, 111, 0.4);
+        }
+
+        .mic-button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 15px 40px rgba(238, 90, 111, 0.6);
+        }
+
+        .mic-button.listening {
+            background: linear-gradient(135deg, #51cf66, #37b24d);
+            animation: pulse 1.5s infinite;
+        }
+
+        .mic-button.speaking {
+            background: linear-gradient(135deg, #4c6ef5, #3b5bdb);
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+        .mic-icon {
+            width: 50px;
+            height: 50px;
+            fill: white;
+        }
+
+        .status {
+            text-align: center;
+            font-size: 18px;
+            color: #666;
+            margin-bottom: 20px;
+            min-height: 30px;
+        }
+
+        .transcript {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 10px;
+            line-height: 1.5;
+        }
+
+        .user-message {
+            background: #e3f2fd;
+            color: #1565c0;
+            margin-left: 20px;
+        }
+
+        .assistant-message {
+            background: #f3e5f5;
+            color: #6a1b9a;
+            margin-right: 20px;
+        }
+
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .instructions {
+            background: #fff3cd;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #856404;
+        }
+
+        .instructions strong {
+            display: block;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🍳 ShareChef Voice Assistant</h1>
+        <p class="subtitle">Your personal cooking companion</p>
+
+        <div class="error" id="error"></div>
+
+        <button class="mic-button" id="micButton">
+            <svg class="mic-icon" viewBox="0 0 24 24">
+                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+            </svg>
+        </button>
+
+        <div class="status" id="status">Click the microphone to start</div>
+
+        <div class="transcript" id="transcript">
+            <div class="message assistant-message">
+                Hi! I'm Chef AI, your personal cooking assistant. Click the microphone and ask me anything about cooking! 👨‍🍳
+            </div>
+        </div>
+
+        <div class="instructions">
+            <strong>How to use:</strong>
+            1. Click the microphone button<br>
+            2. Say your question (e.g., "How do I make pasta?")<br>
+            3. Wait for my response<br>
+            4. Click again to ask another question
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const GEMINI_API_KEY = 'AIzaSyD_BF5igBgwgTox5LoQMC5GpJl6ldtOkf4'; // Your actual key
+        const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+
+        // Elements
+        const micButton = document.getElementById('micButton');
+        const status = document.getElementById('status');
+        const transcript = document.getElementById('transcript');
+        const errorDiv = document.getElementById('error');
+
+        // Speech Recognition Setup
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        
+        if (!SpeechRecognition) {
+            showError('Speech recognition not supported in this browser. Please use Chrome.');
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+
+        // Speech Synthesis Setup
+        const synth = window.speechSynthesis;
+
+        let isListening = false;
+        let conversationHistory = [];
+
+        // Initialize with system message
+        conversationHistory.push({
+            role: 'model',
+            parts: [{ text: 'Hi! I\'m Chef AI, your personal cooking assistant. Ask me anything about cooking!' }]
+        });
+
+        micButton.addEventListener('click', toggleListening);
+
+        function toggleListening() {
+            if (isListening) {
+                stopListening();
+            } else {
+                startListening();
+            }
+        }
+
+        function startListening() {
+            try {
+                recognition.start();
+                isListening = true;
+                micButton.classList.add('listening');
+                status.textContent = '🎤 Listening... speak now!';
+                errorDiv.style.display = 'none';
+            } catch (error) {
+                showError('Could not start microphone: ' + error.message);
+            }
+        }
+
+        function stopListening() {
+            recognition.stop();
+            isListening = false;
+            micButton.classList.remove('listening');
+            status.textContent = 'Click to speak';
+        }
+
+        recognition.onresult = async (event) => {
+            const userText = event.results[0][0].transcript;
+            
+            // Display user message
+            addMessage(userText, 'user');
+            status.textContent = '🤔 Thinking...';
+
+            // Get AI response
+            try {
+                const response = await getGeminiResponse(userText);
+                addMessage(response, 'assistant');
+                
+                // Speak the response
+                speak(response);
+            } catch (error) {
+                showError('Failed to get response: ' + error.message);
+                status.textContent = 'Click to try again';
+            }
+
+            stopListening();
+        };
+
+        recognition.onerror = (event) => {
+            stopListening();
+            if (event.error === 'no-speech') {
+                status.textContent = 'No speech detected. Click to try again.';
+            } else {
+                showError('Speech recognition error: ' + event.error);
+            }
+        };
+
+        recognition.onend = () => {
+            isListening = false;
+            micButton.classList.remove('listening');
+        };
+
+        async function getGeminiResponse(userMessage) {
+            // Add user message to history
+            conversationHistory.push({
+                role: 'user',
+                parts: [{ text: userMessage }]
+            });
+
+            const requestBody = {
+                contents: conversationHistory,
+                generationConfig: {
+                    temperature: 0.7,
+                    maxOutputTokens: 200, // Keep responses concise for voice
+                },
+                systemInstruction: {
+                    parts: [{
+                        text: `You are Chef AI, a friendly cooking assistant. Keep responses SHORT (2-3 sentences) and conversational. Be warm and encouraging.`
+                    }]
+                }
+            };
+
+            const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(requestBody)
+            });
+
+            if (!response.ok) {
+                throw new Error(`API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            const aiResponse = data.candidates[0].content.parts[0].text;
+
+            // Add AI response to history
+            conversationHistory.push({
+                role: 'model',
+                parts: [{ text: aiResponse }]
+            });
+
+            return aiResponse;
+        }
+
+        function speak(text) {
+            // Cancel any ongoing speech
+            synth.cancel();
+
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.0;
+            utterance.pitch = 1.0;
+            utterance.volume = 1.0;
+
+            // Use a friendly voice if available
+            const voices = synth.getVoices();
+            const preferredVoice = voices.find(voice => 
+                voice.name.includes('Female') || voice.name.includes('Samantha')
+            );
+            if (preferredVoice) {
+                utterance.voice = preferredVoice;
+            }
+
+            micButton.classList.add('speaking');
+            status.textContent = '🔊 Speaking...';
+
+            utterance.onend = () => {
+                micButton.classList.remove('speaking');
+                status.textContent = 'Click to speak';
+            };
+
+            synth.speak(utterance);
+        }
+
+        function addMessage(text, type) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}-message`;
+            messageDiv.textContent = text;
+            transcript.appendChild(messageDiv);
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+
+        function showError(message) {
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            status.textContent = 'Error occurred';
+        }
+
+        // Load voices when available
+        if (synth.onvoiceschanged !== undefined) {
+            synth.onvoiceschanged = () => {
+                synth.getVoices();
+            };
+        }
+    </script>
+</body>
+</html>
