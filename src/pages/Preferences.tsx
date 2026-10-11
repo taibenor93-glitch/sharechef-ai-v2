@@ -9,10 +9,27 @@ import {
   suspendAnalyticsForAccountDeletion,
 } from '../lib/events'
 import { resetIdentity } from '../lib/session'
+import { isRecordingMode, setRecordingMode } from '../lib/recordingMode'
 
 export function PreferencesPage() {
   const { userId } = useAuth()
   const navigate = useNavigate()
+
+  // Hidden switch: five quick taps on the page title toggles recording mode.
+  const [recMode, setRecMode] = useState<boolean>(isRecordingMode)
+  const [titleTaps, setTitleTaps] = useState<{ n: number; at: number }>({ n: 0, at: 0 })
+  const onTitleTap = () => {
+    const now = Date.now()
+    const n = now - titleTaps.at < 1500 ? titleTaps.n + 1 : 1
+    if (n >= 5) {
+      const next = !recMode
+      setRecordingMode(next)
+      setRecMode(next)
+      setTitleTaps({ n: 0, at: 0 })
+    } else {
+      setTitleTaps({ n, at: now })
+    }
+  }
 
   // ── Account deletion (Revision 6) ──────────────────────────────────────────
   // Deletion needs only the "I understand" confirmation and the user's current
@@ -158,7 +175,12 @@ export function PreferencesPage() {
   return (
     <div className="container stack">
       <div className="hero-head">
-        <h1 className="page-title">Culinary preferences</h1>
+        <h1 className="page-title" onClick={onTitleTap}>Culinary preferences</h1>
+        {recMode && (
+          <p className="muted" style={{ fontSize: 13, margin: '6px auto 0' }}>
+            Recording mode is on. Tap the title five times to turn it off.
+          </p>
+        )}
         <p className="page-sub" style={{ margin: '10px auto 0' }}>
           Micheli follows these every time she cooks with you — no need to remind her.
         </p>

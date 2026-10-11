@@ -5,6 +5,7 @@
 import { WS_BASE } from '../lib/apiBase'
 import { getAnonId, getSessionId, initIdentity } from '../lib/session'
 import { APP_VERSION, voiceActivity } from '../lib/events'
+import { isRecordingMode } from '../lib/recordingMode'
 
 // Phase 1 events: identity + app version ride the auth frame ONLY when
 // analytics is enabled, so a disabled build sends no persistent identifier.
@@ -264,8 +265,11 @@ export class RealtimeVoice {
     const socket = this.ws
     try {
       if (!this.micStream) {
+        // Recording mode (hidden, off by default) asks for a plain mic so iOS
+        // does not treat the cook as a call and drop audio from screen recordings.
+        const processed = !isRecordingMode()
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          audio: { echoCancellation: processed, noiseSuppression: processed, autoGainControl: processed },
           video: false,
         })
         if (this.intentionalEnd || this.ws !== socket) {
