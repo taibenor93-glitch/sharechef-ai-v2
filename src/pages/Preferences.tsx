@@ -9,26 +9,17 @@ import {
   suspendAnalyticsForAccountDeletion,
 } from '../lib/events'
 import { resetIdentity } from '../lib/session'
-import { isRecordingMode, setRecordingMode } from '../lib/recordingMode'
+import { canUseRecordingMode, isRecordingMode, setRecordingMode } from '../lib/recordingMode'
 
 export function PreferencesPage() {
   const { userId } = useAuth()
   const navigate = useNavigate()
 
-  // Hidden switch: five quick taps on the page title toggles recording mode.
+  // Recording mode switch (owner accounts only, see lib/recordingMode).
   const [recMode, setRecMode] = useState<boolean>(isRecordingMode)
-  const [titleTaps, setTitleTaps] = useState<{ n: number; at: number }>({ n: 0, at: 0 })
-  const onTitleTap = () => {
-    const now = Date.now()
-    const n = now - titleTaps.at < 1500 ? titleTaps.n + 1 : 1
-    if (n >= 5) {
-      const next = !recMode
-      setRecordingMode(next)
-      setRecMode(next)
-      setTitleTaps({ n: 0, at: 0 })
-    } else {
-      setTitleTaps({ n, at: now })
-    }
+  const onRecModeChange = (on: boolean) => {
+    setRecordingMode(on)
+    setRecMode(on)
   }
 
   // ── Account deletion (Revision 6) ──────────────────────────────────────────
@@ -175,16 +166,23 @@ export function PreferencesPage() {
   return (
     <div className="container stack">
       <div className="hero-head">
-        <h1 className="page-title" onClick={onTitleTap}>Culinary preferences</h1>
-        {recMode && (
-          <p className="muted" style={{ fontSize: 13, margin: '6px auto 0' }}>
-            Recording mode is on. Tap the title five times to turn it off.
-          </p>
-        )}
+        <h1 className="page-title">Culinary preferences</h1>
         <p className="page-sub" style={{ margin: '10px auto 0' }}>
           Micheli follows these every time she cooks with you — no need to remind her.
         </p>
       </div>
+
+      {canUseRecordingMode(userId) && (
+        <div className="card stack">
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600 }}>
+            <input type="checkbox" checked={recMode} onChange={(e) => onRecModeChange(e.target.checked)} />
+            Recording mode
+          </label>
+          <div className="muted" style={{ fontSize: 13 }}>
+            Turn on before screen recording a cook, so the video keeps the sound. Start a new cook after changing it.
+          </div>
+        </div>
+      )}
 
       <div className="card stack">
         {loading ? (
