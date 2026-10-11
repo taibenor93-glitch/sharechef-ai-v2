@@ -1188,7 +1188,9 @@ wss.on('connection', (browserWs, req) => {
   // Older app builds never send it — their first frame starts a guest session.
   // A client that connects but sends nothing still gets a session after 4s.
   const authTimer = setTimeout(() => {
-    if (!started && !authInFlight) startOpenAI()
+    // No auth frame within 4s: sign-in is required, so close instead of
+    // starting an anonymous session.
+    if (!started && !authInFlight) { try { browserWs.close(1000) } catch { /* already closed */ } }
   }, 4000)
 
   browserWs.on('message', async (data) => {
@@ -1240,9 +1242,14 @@ wss.on('connection', (browserWs, req) => {
             loadCookState(parsed.token),
             loadMemory(parsed.token),
           ])
-        } else if (typeof parsed.guestId === 'string' && parsed.guestId.length >= 8 && parsed.guestId.length <= 100) {
-          guestId = parsed.guestId
-          cookState = loadGuestCookState(guestId)
+        } else if (!isTestSession) {
+          // Sign-in is required. No verified user means no voice session:
+          // tell the app, then close before any OpenAI cost is incurred.
+          console.log('[WS] auth: refused (no signed-in user)')
+          authInFlight = false
+          try { browserWs.send(JSON.stringify({ type: 'sc.auth_required' })) } catch { /* closing anyway */ }
+          browserWs.close(1000)
+          return
         }
         console.log(`[WS] auth: ${user ? `user ${user.id}` : guestId ? 'guest (tracked)' : 'guest'}${profile ? ' (profile loaded)' : ''}${cookState ? ' (resuming cook)' : ''}${memory ? ' (memory loaded)' : ''}${isReconnect ? ' (reconnect)' : ''}${isTestSession ? ' (TEST MODEL)' : ''}`)
         authInFlight = false
@@ -1265,10 +1272,10 @@ wss.on('connection', (browserWs, req) => {
         startOpenAI()
         return // the auth frame itself is never forwarded to OpenAI
       }
-      // Old client: first frame is a normal realtime event — start as guest.
+      // Old client that never sends an auth frame: sign-in is required now.
       clearTimeout(authTimer)
-      startOpenAI()
-      pending.push(text)
+      try { browserWs.send(JSON.stringify({ type: 'sc.auth_required' })) } catch { /* closing anyway */ }
+      browserWs.close(1000)
       return
     }
 

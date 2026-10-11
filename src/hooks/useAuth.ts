@@ -112,7 +112,8 @@ export function useAuth() {
     session,
     guest,
     loading,
-    authed: !!session || guest,
+    // Sign-in is required: guest mode no longer opens the app.
+    authed: !!session,
     userId: session?.user.id ?? null,
   }
 }

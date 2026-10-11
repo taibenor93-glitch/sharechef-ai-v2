@@ -361,6 +361,12 @@ export class RealtimeVoice {
         this.cb.onStatus('idle')
         this.cb.onLimit?.({ used: Number(msg.used ?? 0), limit: Number(msg.limit ?? 3) })
         break
+      // Server requires a signed-in account - end cleanly (no reconnect).
+      case 'sc.auth_required':
+        this.disconnect()
+        this.cb.onStatus('idle')
+        this.cb.onError('Please sign in to cook with Micheli.')
+        break
       // Assistant audio (gpt-realtime GA event name)
       case 'response.output_audio.delta':
         this.queueAudio(msg.delta as string)
