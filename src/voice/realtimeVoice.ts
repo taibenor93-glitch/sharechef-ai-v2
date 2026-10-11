@@ -425,7 +425,13 @@ export class RealtimeVoice {
     if (!this.isPlayingAudio) {
       this.isPlayingAudio = true
       this.nextPlayTime = this.playbackCtx.currentTime + 0.15
-      this.stopListening() // mute mic while Micheli speaks — avoids echo with server VAD
+      // Mute mic while Micheli speaks — avoids echo with server VAD. In
+      // recording mode, release the microphone entirely for the duration: with
+      // no capture active iOS drops the play-and-record audio session, so a
+      // screen recording can include her voice. startListening() re-acquires
+      // the mic when she finishes (see response.done).
+      if (isRecordingMode()) this.releaseMic()
+      else this.stopListening()
       this.cb.onStatus('speaking')
     }
     const binary = atob(base64)

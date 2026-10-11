@@ -176,10 +176,10 @@ export function PreferencesPage() {
         <div className="card stack">
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600 }}>
             <input type="checkbox" checked={recMode} onChange={(e) => onRecModeChange(e.target.checked)} />
-            Recording mode
+            Keep sound in screen recordings
           </label>
           <div className="muted" style={{ fontSize: 13 }}>
-            Turn on before screen recording a cook, so the video keeps the sound. Start a new cook after changing it.
+            This does not record by itself. Turn it on, start a new cook, then use the iPhone screen recorder as usual.
           </div>
         </div>
       )}
