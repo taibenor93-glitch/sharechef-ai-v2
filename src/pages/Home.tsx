@@ -14,6 +14,7 @@ import { UpgradeSheet } from '../components/UpgradeSheet'
 import { syncPlusWithServer } from '../lib/purchases'
 import { canUseRecordingMode } from '../lib/recordingMode'
 import { ScreenRecorder, canRecordInApp } from '../lib/screenRecorder'
+import { startTape, stopTape, isTaping } from '../lib/soundTape'
 
 type Line = { role: 'user' | 'chef'; text: string }
 
@@ -32,19 +33,26 @@ export function HomePage() {
   const showRecorder = canUseRecordingMode(userId) && canRecordInApp()
   const [recording, setRecording] = useState(false)
   const [recError, setRecError] = useState<string | null>(null)
+  const [savingClip, setSavingClip] = useState(false)
   async function toggleRecording() {
     setRecError(null)
     try {
       if (recording) {
-        await ScreenRecorder.stop()
         setRecording(false)
+        setSavingClip(true)
+        const audioWav = stopTape()
+        await ScreenRecorder.stop({ audioWav })
       } else {
-        await ScreenRecorder.start({ microphone: true })
+        await ScreenRecorder.start({ microphone: false })
+        startTape()
         setRecording(true)
       }
     } catch (e) {
+      if (isTaping()) stopTape()
       setRecording(false)
       setRecError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingClip(false)
     }
   }
   const nav = useNavigate()
@@ -283,9 +291,10 @@ export function HomePage() {
               type="button"
               className="btn btn-ghost"
               style={{ marginTop: 8 }}
+              disabled={savingClip}
               onClick={() => { void toggleRecording() }}
             >
-              {recording ? '■ Stop recording' : '● Record this cook'}
+              {savingClip ? 'Saving video…' : recording ? '■ Stop recording' : '● Record this cook'}
             </button>
           )}
           {recError && <div className="alert alert-error" style={{ marginTop: 6 }}>{recError}</div>}

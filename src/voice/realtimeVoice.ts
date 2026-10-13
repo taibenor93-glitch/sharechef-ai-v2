@@ -6,6 +6,7 @@ import { WS_BASE } from '../lib/apiBase'
 import { getAnonId, getSessionId, initIdentity } from '../lib/session'
 import { APP_VERSION, voiceActivity } from '../lib/events'
 import { isRecordingMode } from '../lib/recordingMode'
+import { tapeMic, tapeVoice } from '../lib/soundTape'
 
 // Phase 1 events: identity + app version ride the auth frame ONLY when
 // analytics is enabled, so a disabled build sends no persistent identifier.
@@ -417,6 +418,7 @@ export class RealtimeVoice {
 
   private onAudioChunk(buf: ArrayBuffer): void {
     if (!this.isListening) return
+    tapeMic(buf)
     this.wsSend({ type: 'input_audio_buffer.append', audio: this.toBase64(buf) })
   }
 
@@ -447,6 +449,7 @@ export class RealtimeVoice {
     node.connect(this.playbackCtx.destination)
     const startAt = Math.max(this.nextPlayTime, this.playbackCtx.currentTime + 0.05)
     node.start(startAt)
+    tapeVoice(samples, performance.now() + (startAt - this.playbackCtx.currentTime) * 1000)
     this.nextPlayTime = startAt + buffer.duration
   }
 
