@@ -12,6 +12,8 @@ import { LANGUAGES, initialLanguage, saveLanguage, savedLanguage } from '../lib/
 import { track } from '../lib/events'
 import { UpgradeSheet } from '../components/UpgradeSheet'
 import { syncPlusWithServer } from '../lib/purchases'
+import { canUseRecordingMode } from '../lib/recordingMode'
+import { ScreenRecorder, canRecordInApp } from '../lib/screenRecorder'
 
 type Line = { role: 'user' | 'chef'; text: string }
 
@@ -26,6 +28,25 @@ const STATUS_LABEL: Record<VoiceStatus, string> = {
 
 export function HomePage() {
   const { userId } = useAuth()
+  // In-app recorder (owner only). See lib/screenRecorder.
+  const showRecorder = canUseRecordingMode(userId) && canRecordInApp()
+  const [recording, setRecording] = useState(false)
+  const [recError, setRecError] = useState<string | null>(null)
+  async function toggleRecording() {
+    setRecError(null)
+    try {
+      if (recording) {
+        await ScreenRecorder.stop()
+        setRecording(false)
+      } else {
+        await ScreenRecorder.start({ microphone: true })
+        setRecording(true)
+      }
+    } catch (e) {
+      setRecording(false)
+      setRecError(e instanceof Error ? e.message : String(e))
+    }
+  }
   const nav = useNavigate()
 
   // ── voice ──
@@ -257,6 +278,17 @@ export function HomePage() {
               </>
             )}
           </div>
+          {showRecorder && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ marginTop: 8 }}
+              onClick={() => { void toggleRecording() }}
+            >
+              {recording ? '■ Stop recording' : '● Record this cook'}
+            </button>
+          )}
+          {recError && <div className="alert alert-error" style={{ marginTop: 6 }}>{recError}</div>}
           {status !== 'idle' && (
             <button type="button" className="link-btn" onClick={toggleVoice}>End session</button>
           )}
