@@ -34,14 +34,19 @@ export function HomePage() {
   const [recording, setRecording] = useState(false)
   const [recError, setRecError] = useState<string | null>(null)
   const [savingClip, setSavingClip] = useState(false)
+  const [recInfo, setRecInfo] = useState<string | null>(null)
   async function toggleRecording() {
     setRecError(null)
+    setRecInfo(null)
     try {
       if (recording) {
         setRecording(false)
         setSavingClip(true)
-        const audioWav = stopTape()
-        await ScreenRecorder.stop({ audioWav })
+        const tape = stopTape()
+        const info = `Sound kept: ${Math.round(tape.seconds)}s, level ${Math.round(tape.peak * 100)}%, Micheli parts ${tape.voiceChunks}, your parts ${tape.micChunks}`
+        setRecInfo(info)
+        const res = await ScreenRecorder.stop({ audioWav: tape.wav })
+        setRecInfo(`${info}. Joined to video: ${res.audioTracks > 0 ? 'yes' : 'NO'}. Saved to Photos.`)
       } else {
         await ScreenRecorder.start({ microphone: false })
         startTape()
@@ -298,6 +303,7 @@ export function HomePage() {
             </button>
           )}
           {recError && <div className="alert alert-error" style={{ marginTop: 6 }}>{recError}</div>}
+          {showRecorder && recInfo && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{recInfo} (build 27)</div>}
           {status !== 'idle' && (
             <button type="button" className="link-btn" onClick={toggleVoice}>End session</button>
           )}

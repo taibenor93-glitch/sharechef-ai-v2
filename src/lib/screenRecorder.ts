@@ -4,7 +4,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core'
 
 interface ScreenRecorderPlugin {
   start(options: { microphone: boolean }): Promise<{ recording: boolean }>
-  stop(options: { audioWav: string }): Promise<{ saved: boolean }>
+  stop(options: { audioWav: string }): Promise<{ saved: boolean; audioTracks: number }>
   isRecording(): Promise<{ recording: boolean }>
 }
 

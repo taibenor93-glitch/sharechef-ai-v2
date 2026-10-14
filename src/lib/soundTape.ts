@@ -8,10 +8,16 @@ const RATE = 24000
 let startMs = 0
 let running = false
 let chunks: { at: number; samples: Float32Array }[] = []
+let voiceCount = 0
+let micCount = 0
+
+export interface TapeResult { wav: string; seconds: number; peak: number; voiceChunks: number; micChunks: number }
 
 export function startTape(): void {
   startMs = performance.now()
   chunks = []
+  voiceCount = 0
+  micCount = 0
   running = true
 }
 
@@ -22,6 +28,7 @@ export function isTaping(): boolean {
 /** Micheli's voice. wallStartMs: when it will actually play (performance.now clock). */
 export function tapeVoice(samples: Float32Array, wallStartMs: number): void {
   if (!running) return
+  voiceCount++
   chunks.push({ at: Math.round(((wallStartMs - startMs) / 1000) * RATE), samples: samples.slice() })
 }
 
@@ -33,11 +40,12 @@ export function tapeMic(buf: ArrayBuffer): void {
   const samples = new Float32Array(n)
   for (let i = 0; i < n; i++) samples[i] = view.getInt16(i * 2, true) / 32768
   const endAt = Math.round(((performance.now() - startMs) / 1000) * RATE)
+  micCount++
   chunks.push({ at: endAt - n, samples })
 }
 
 /** Stops the tape and returns a base64 WAV of the whole recording. */
-export function stopTape(): string {
+export function stopTape(): TapeResult {
   running = false
   const total = Math.max(1, Math.round(((performance.now() - startMs) / 1000) * RATE))
   const mix = new Float32Array(total)
@@ -48,6 +56,8 @@ export function stopTape(): string {
     }
   }
   chunks = []
+  let peak = 0
+  for (let i = 0; i < total; i++) peak = Math.max(peak, Math.abs(mix[i]))
   const header = 44
   const out = new DataView(new ArrayBuffer(header + total * 2))
   const str = (o: number, s: string) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)) }
@@ -65,5 +75,5 @@ export function stopTape(): string {
   for (let i = 0; i < bytes.length; i += step) {
     bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + step)))
   }
-  return btoa(bin)
+  return { wav: btoa(bin), seconds: total / RATE, peak: Math.min(1, peak), voiceChunks: voiceCount, micChunks: micCount }
 }

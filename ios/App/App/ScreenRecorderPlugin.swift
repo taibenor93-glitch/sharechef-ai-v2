@@ -63,8 +63,9 @@ public class ScreenRecorderPlugin: CAPPlugin, CAPBridgedPlugin, RPPreviewViewCon
                     call.reject("Recording failed: \(error.localizedDescription)")
                     return
                 }
+                // No silent fallback: if the sound is missing, say so.
                 guard let wavData = Data(base64Encoded: wavBase64), wavData.count > 44 else {
-                    self.saveToPhotos(videoURL, call: call)
+                    call.reject("The app's sound copy did not arrive (\(wavBase64.count) characters).")
                     return
                 }
                 let wavURL = tmp.appendingPathComponent("sc-sound-\(stamp).wav")
@@ -77,8 +78,8 @@ public class ScreenRecorderPlugin: CAPPlugin, CAPBridgedPlugin, RPPreviewViewCon
                 }
                 Task {
                     do {
-                        try await self.merge(video: videoURL, audio: wavURL, output: outURL)
-                        self.saveToPhotos(outURL, call: call)
+                        let audioTracks = try await self.merge(video: videoURL, audio: wavURL, output: outURL)
+                        self.saveToPhotos(outURL, audioTracks: audioTracks, call: call)
                     } catch {
                         call.reject("Could not add the sound: \(error.localizedDescription)")
                     }
@@ -87,7 +88,8 @@ public class ScreenRecorderPlugin: CAPPlugin, CAPBridgedPlugin, RPPreviewViewCon
         }
     }
 
-    private func merge(video: URL, audio: URL, output: URL) async throws {
+    @discardableResult
+    private func merge(video: URL, audio: URL, output: URL) async throws -> Int {
         let videoAsset = AVURLAsset(url: video)
         let audioAsset = AVURLAsset(url: audio)
         let comp = AVMutableComposition()
@@ -98,11 +100,13 @@ public class ScreenRecorderPlugin: CAPPlugin, CAPBridgedPlugin, RPPreviewViewCon
         let vDuration = try await videoAsset.load(.duration)
         try vDst.insertTimeRange(CMTimeRange(start: .zero, duration: vDuration), of: vSrc, at: .zero)
         vDst.preferredTransform = try await vSrc.load(.preferredTransform)
+        var audioTracks = 0
         if let aSrc = try await audioAsset.loadTracks(withMediaType: .audio).first,
            let aDst = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
             let aDuration = try await audioAsset.load(.duration)
             let len = CMTimeMinimum(aDuration, vDuration)
             try aDst.insertTimeRange(CMTimeRange(start: .zero, duration: len), of: aSrc, at: .zero)
+            audioTracks = 1
         }
         guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality) else {
             throw NSError(domain: "ScreenRecorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Export not available."])
@@ -113,9 +117,10 @@ public class ScreenRecorderPlugin: CAPPlugin, CAPBridgedPlugin, RPPreviewViewCon
         if export.status != .completed {
             throw export.error ?? NSError(domain: "ScreenRecorder", code: 3, userInfo: [NSLocalizedDescriptionKey: "Export failed."])
         }
+        return audioTracks
     }
 
-    private func saveToPhotos(_ url: URL, call: CAPPluginCall) {
+    private func saveToPhotos(_ url: URL, audioTracks: Int, call: CAPPluginCall) {
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
                 call.reject("Photos access was not allowed. Turn it on in Settings, ShareChef, Photos.")
@@ -125,7 +130,7 @@ public class ScreenRecorderPlugin: CAPPlugin, CAPBridgedPlugin, RPPreviewViewCon
                 PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
             }) { ok, error in
                 if ok {
-                    call.resolve(["saved": true])
+                    call.resolve(["saved": true, "audioTracks": audioTracks])
                 } else {
                     call.reject("Could not save to Photos: \(error?.localizedDescription ?? "unknown error")")
                 }
