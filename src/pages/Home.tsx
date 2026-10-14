@@ -303,7 +303,7 @@ export function HomePage() {
             </button>
           )}
           {recError && <div className="alert alert-error" style={{ marginTop: 6 }}>{recError}</div>}
-          {showRecorder && recInfo && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{recInfo} (build 27)</div>}
+          {showRecorder && recInfo && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{recInfo} (build 30)</div>}
           {status !== 'idle' && (
             <button type="button" className="link-btn" onClick={toggleVoice}>End session</button>
           )}

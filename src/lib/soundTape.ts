@@ -10,6 +10,12 @@ let running = false
 let chunks: { at: number; samples: Float32Array }[] = []
 let voiceCount = 0
 let micCount = 0
+// Where the next mic chunk goes. The worklet's small chunks reach the main
+// thread in bursts; placing each by arrival time piled them on top of each
+// other (the squeak). Chunks are now laid end to end, and only re-anchored
+// to the clock after a real gap (mic paused while Micheli talks).
+let micCursor = -1
+const MIC_RESYNC = RATE / 4
 
 export interface TapeResult { wav: string; seconds: number; peak: number; voiceChunks: number; micChunks: number }
 
@@ -18,6 +24,7 @@ export function startTape(): void {
   chunks = []
   voiceCount = 0
   micCount = 0
+  micCursor = -1
   running = true
 }
 
@@ -39,9 +46,11 @@ export function tapeMic(buf: ArrayBuffer): void {
   const n = Math.floor(buf.byteLength / 2)
   const samples = new Float32Array(n)
   for (let i = 0; i < n; i++) samples[i] = view.getInt16(i * 2, true) / 32768
-  const endAt = Math.round(((performance.now() - startMs) / 1000) * RATE)
+  const expected = Math.round(((performance.now() - startMs) / 1000) * RATE) - n
+  if (micCursor < 0 || Math.abs(expected - micCursor) > MIC_RESYNC) micCursor = expected
   micCount++
-  chunks.push({ at: endAt - n, samples })
+  chunks.push({ at: micCursor, samples })
+  micCursor += n
 }
 
 /** Stops the tape and returns a base64 WAV of the whole recording. */
