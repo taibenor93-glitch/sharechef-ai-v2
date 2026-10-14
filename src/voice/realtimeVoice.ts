@@ -5,7 +5,6 @@
 import { WS_BASE } from '../lib/apiBase'
 import { getAnonId, getSessionId, initIdentity } from '../lib/session'
 import { APP_VERSION, voiceActivity } from '../lib/events'
-import { isRecordingMode } from '../lib/recordingMode'
 import { tapeMic, tapeVoice } from '../lib/soundTape'
 
 // Phase 1 events: identity + app version ride the auth frame ONLY when
@@ -266,11 +265,13 @@ export class RealtimeVoice {
     const socket = this.ws
     try {
       if (!this.micStream) {
-        // Recording mode (hidden, off by default) asks for a plain mic so iOS
-        // does not treat the cook as a call and drop audio from screen recordings.
-        const processed = !isRecordingMode()
+        // Always take the processed mic. echoCancellation and noiseSuppression
+        // keep Micheli out of her own input, and autoGainControl is iOS's
+        // automatic volume boost — the thing that keeps a soft voice audible.
+        // Nothing here depends on what iOS puts into a system screen recording:
+        // the Record button keeps its own sound tape (lib/soundTape).
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: processed, noiseSuppression: processed, autoGainControl: processed },
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           video: false,
         })
         if (this.intentionalEnd || this.ws !== socket) {
@@ -427,13 +428,11 @@ export class RealtimeVoice {
     if (!this.isPlayingAudio) {
       this.isPlayingAudio = true
       this.nextPlayTime = this.playbackCtx.currentTime + 0.15
-      // Mute mic while Micheli speaks — avoids echo with server VAD. In
-      // recording mode, release the microphone entirely for the duration: with
-      // no capture active iOS drops the play-and-record audio session, so a
-      // screen recording can include her voice. startListening() re-acquires
-      // the mic when she finishes (see response.done).
-      if (isRecordingMode()) this.releaseMic()
-      else this.stopListening()
+      // Mute the mic while Micheli speaks — avoids echo with server VAD. Keep
+      // the MediaStream itself alive: releasing and re-acquiring it on every
+      // turn churns the iOS audio session, which is what wrecked the sound.
+      // Only a path that ends the session calls releaseMic().
+      this.stopListening()
       this.cb.onStatus('speaking')
     }
     const binary = atob(base64)

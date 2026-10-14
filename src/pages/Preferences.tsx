@@ -9,18 +9,10 @@ import {
   suspendAnalyticsForAccountDeletion,
 } from '../lib/events'
 import { resetIdentity } from '../lib/session'
-import { canUseRecordingMode, isRecordingMode, setRecordingMode } from '../lib/recordingMode'
 
 export function PreferencesPage() {
   const { userId } = useAuth()
   const navigate = useNavigate()
-
-  // Recording mode switch (owner accounts only, see lib/recordingMode).
-  const [recMode, setRecMode] = useState<boolean>(isRecordingMode)
-  const onRecModeChange = (on: boolean) => {
-    setRecordingMode(on)
-    setRecMode(on)
-  }
 
   // ── Account deletion (Revision 6) ──────────────────────────────────────────
   // Deletion needs only the "I understand" confirmation and the user's current
@@ -171,18 +163,6 @@ export function PreferencesPage() {
           Micheli follows these every time she cooks with you — no need to remind her.
         </p>
       </div>
-
-      {canUseRecordingMode(userId) && (
-        <div className="card stack">
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600 }}>
-            <input type="checkbox" checked={recMode} onChange={(e) => onRecModeChange(e.target.checked)} />
-            Keep sound in screen recordings
-          </label>
-          <div className="muted" style={{ fontSize: 13 }}>
-            This does not record by itself. Turn it on, start a new cook, then use the iPhone screen recorder as usual.
-          </div>
-        </div>
-      )}
 
       <div className="card stack">
         {loading ? (
