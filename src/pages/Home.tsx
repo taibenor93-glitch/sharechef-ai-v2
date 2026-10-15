@@ -205,6 +205,7 @@ export function HomePage() {
   const onSave = async () => {
     if (!recipe) return
     if (!userId) { setGuest(false); nav('/login'); return } // guests sign in to save (leave guest mode or /login bounces back)
+    setPhotoStep('ask')
     await saveRecipe(recipe, userId)
   }
 
