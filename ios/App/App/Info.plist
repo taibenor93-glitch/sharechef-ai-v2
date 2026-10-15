@@ -41,6 +41,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>ShareChef uses the microphone so you can talk to Micheli, your AI chef, hands-free while cooking.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>ShareChef uses the camera so you can snap a photo of the dish you cooked and save it with your recipe.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>ShareChef saves your cooking videos to Photos when you record a cook.</string>
 	<key>UIApplicationSceneManifest</key>

@@ -223,6 +223,8 @@ input::placeholder { color: var(--muted); }
 .recipe-cols li { margin-bottom: 0.5rem; color: var(--ink-soft); font-size: 1.0625rem; line-height: 1.5; }  /* steps are read mid-cook */
 .recipe-cols li::marker { color: var(--muted); }  /* gold reserved for signals */
 .tip { margin-top: 16px; padding: 0.875rem 1rem; border-radius: var(--radius-sm); background: var(--amber-soft); border: 1px solid rgba(216,171,92,.3); color: var(--ink); font-size: 0.9375rem; line-height: 1.5; }
+.photo-prompt { margin-top: 8px; padding: 1rem; border-radius: var(--radius-sm); background: var(--amber-soft); border: 1px solid rgba(216,171,92,.3); }
+.dish-photo { width: 100%; max-height: 420px; object-fit: cover; border-radius: var(--radius-sm); border: 1px solid var(--border); display: block; }
 hr.sep { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
 
 /* ---------- conversation ---------- */

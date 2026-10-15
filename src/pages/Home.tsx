@@ -11,6 +11,7 @@ import { getStarProgress } from '../lib/stars'
 import { LANGUAGES, initialLanguage, saveLanguage, savedLanguage } from '../lib/language'
 import { track } from '../lib/events'
 import { UpgradeSheet } from '../components/UpgradeSheet'
+import { DishPhotoPrompt } from '../components/DishPhotoPrompt'
 import { syncPlusWithServer } from '../lib/purchases'
 import { canUseRecordingMode } from '../lib/recordingMode'
 import { ScreenRecorder, canRecordInApp } from '../lib/screenRecorder'
@@ -81,6 +82,9 @@ export function HomePage() {
   const [genBusy, setGenBusy] = useState(false)
   const [genError, setGenError] = useState<string | null>(null)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
+  // After a save: the new recipe's id, and whether the "snap your dish" step is done.
+  const [savedId, setSavedId] = useState<string | null>(null)
+  const [photoStep, setPhotoStep] = useState<'ask' | 'saved' | 'skipped'>('ask')
 
   // ── gamification ──
   const [savedCount, setSavedCount] = useState(0)
@@ -180,6 +184,8 @@ export function HomePage() {
     setGenError(null)
     setRecipe(null)
     setSaveState('idle')
+    setSavedId(null)
+    setPhotoStep('ask')
     try {
       const { data } = await supabase.auth.getSession()
       const r = await generateRecipe(ingredients, language, data.session?.access_token ?? null)
@@ -195,7 +201,7 @@ export function HomePage() {
     if (!recipe) return
     if (!userId) { setGuest(false); nav('/login'); return } // guests sign in to save (leave guest mode or /login bounces back)
     setSaveState('saving')
-    const { error } = await supabase.from('recipes').insert({
+    const { data: inserted, error } = await supabase.from('recipes').insert({
       user_id: userId,
       title: recipe.title,
       description: recipe.description || null,
@@ -204,7 +210,7 @@ export function HomePage() {
       cook_time_minutes: recipe.cook_time_minutes,
       servings: recipe.servings,
       tags: recipe.tags,
-    })
+    }).select('id').single()
     if (error) {
       setGenError(error.message)
       setSaveState('idle')
@@ -214,6 +220,7 @@ export function HomePage() {
       const { data } = await supabase.auth.getSession()
       track('dish_saved', undefined, data.session?.access_token ?? null)
     }
+    setSavedId(inserted?.id ?? null)
     setSaveState('saved')
     loadCount()
   }
@@ -423,6 +430,23 @@ export function HomePage() {
                   : userId ? 'Save to my recipes' : 'Sign in to save'}
             </button>
           </div>
+
+          {userId && savedId && photoStep === 'ask' && (
+            <DishPhotoPrompt
+              userId={userId}
+              recipeId={savedId}
+              onSaved={() => setPhotoStep('saved')}
+              onSkip={() => setPhotoStep('skipped')}
+            />
+          )}
+          {savedId && photoStep !== 'ask' && (
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+              <div className="muted">{photoStep === 'saved' ? '📸 Photo saved with your recipe.' : 'Saved without a photo.'}</div>
+              <button type="button" className="btn btn-ghost" onClick={() => nav(`/saved/${savedId}`)}>
+                Share it →
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

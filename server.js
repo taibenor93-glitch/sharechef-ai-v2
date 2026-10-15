@@ -74,7 +74,8 @@ app.use('/api/events', (err, _req, res, _next) => {
 // rows another household member generated on a shared installation. Functional
 // data of other users is never touched (it is keyed by their own user_id).
 // Hard delete only (shouldSoftDelete=false); production CASCADE FKs then remove
-// profiles, recipes, shares, cook_sessions, micheli_memory in one step.
+// profiles, recipes, shares, cook_sessions, micheli_memory in one step. Dish
+// photos live in Storage (no FK), so they are removed explicitly first.
 const DELETE_MAX_PER_HOUR = 5
 const deleteBuckets = new Map() // ip → { hourStart, count } (per-process, best-effort)
 function deleteRateLimited(key) {
@@ -135,6 +136,18 @@ let deletionUserVerifier = verifyUserForDeletion
 // retry-safe: re-running any step removes nothing new; after a partial failure
 // the retry is safe because analytics disappearing first is the privacy-correct
 // failure mode. Never touches another user's functional data.
+async function removeUserDishPhotos(db, userId) {
+  const bucket = db.storage.from('dish-photos')
+  for (;;) {
+    const { data, error } = await bucket.list(userId, { limit: 100 })
+    // Bucket not created yet (migration pending): there are no photos to remove.
+    if (error) return { ok: /bucket not found/i.test(error.message || '') }
+    if (!data || data.length === 0) return { ok: true }
+    const { error: rmErr } = await bucket.remove(data.map((f) => `${userId}/${f.name}`))
+    if (rmErr) return { ok: false }
+  }
+}
+
 async function performAccountDeletion(db, userId) {
   // 1) Collect every installation id ever attributed to this user.
   const { data: rows, error: selErr } = await db.from('app_events').select('anon_id').eq('user_id', userId)
@@ -149,7 +162,11 @@ async function performAccountDeletion(db, userId) {
   }
   const { error: delUserErr } = await db.from('app_events').delete().eq('user_id', userId)
   if (delUserErr) return { ok: false, step: 'analytics-user' }
-  // 3) HARD delete of the auth user (shouldSoftDelete=false — never soft).
+  // 3) Dish photos. Storage files have no foreign key, so the CASCADE below
+  //    never reaches them. Remove the user's whole '<user_id>/' folder first.
+  const photos = await removeUserDishPhotos(db, userId)
+  if (!photos.ok) return { ok: false, step: 'photos' }
+  // 4) HARD delete of the auth user (shouldSoftDelete=false — never soft).
   //    Production ON DELETE CASCADE removes all functional data atomically.
   const { error: adminErr } = await db.auth.admin.deleteUser(userId, false)
   if (adminErr) return { ok: false, step: 'auth' }

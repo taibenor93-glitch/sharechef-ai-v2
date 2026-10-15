@@ -84,7 +84,7 @@ await new Promise((resolve) => rlSrv.close(resolve))
 // ── Phase B: core deletion procedure with a fake db (in-process) ─────────────
 
 function makeFakeDb(rows, opts = {}) {
-  const calls = { deletedUsers: [], softFlags: [] }
+  const calls = { deletedUsers: [], softFlags: [], removedPhotos: [] }
   const db = {
     from(table) {
       if (table !== 'app_events') throw new Error('unexpected table: ' + table)
@@ -112,6 +112,26 @@ function makeFakeDb(rows, opts = {}) {
           }
         },
       }
+    },
+    storage: {
+      from(bucket) {
+        return {
+          async list(prefix) {
+            if (opts.noBucket) return { data: null, error: { message: 'Bucket not found' } }
+            if (opts.failPhotoList) return { data: null, error: { message: 'boom' } }
+            const own = (opts.photos || []).filter((f) => f.startsWith(`${prefix}/`))
+            return { data: own.map((f) => ({ name: f.slice(prefix.length + 1) })), error: null }
+          },
+          async remove(paths) {
+            calls.removedPhotos.push(...paths.map((p) => `${bucket}:${p}`))
+            for (const p of paths) {
+              const i = opts.photos.indexOf(p)
+              if (i >= 0) opts.photos.splice(i, 1)
+            }
+            return { error: null }
+          },
+        }
+      },
     },
     auth: {
       admin: {
@@ -168,6 +188,29 @@ function scenarioRows() {
   const working = makeFakeDb(rows)
   const r2 = await __test.performAccountDeletion(working.db, A)
   check('retry after admin failure completes the deletion', r2.ok === true && working.calls.deletedUsers[0] === A)
+}
+
+{
+  // Dish photos: A's folder is emptied before the auth delete; B's photos survive.
+  const photos = [`${A}/r1.jpg`, `${A}/r2.jpg`, `${B}/r3.jpg`]
+  const { db, calls } = makeFakeDb(scenarioRows(), { photos })
+  const r = await __test.performAccountDeletion(db, A)
+  check('A\'s dish photos removed from the dish-photos bucket', r.ok === true && !photos.some((p) => p.startsWith(`${A}/`)) && calls.removedPhotos.every((p) => p.startsWith(`dish-photos:${A}/`)))
+  check('User B\'s dish photos survive', photos.includes(`${B}/r3.jpg`))
+}
+
+{
+  // Photo listing failure: stop before deleting the auth user, so a retry still finds the photos.
+  const { db, calls } = makeFakeDb(scenarioRows(), { failPhotoList: true })
+  const r = await __test.performAccountDeletion(db, A)
+  check('photo listing failure aborts before auth delete', r.ok === false && r.step === 'photos' && calls.deletedUsers.length === 0)
+}
+
+{
+  // Bucket not created yet (migration not applied): deletion still completes.
+  const { db } = makeFakeDb(scenarioRows(), { noBucket: true })
+  const r = await __test.performAccountDeletion(db, A)
+  check('missing dish-photos bucket does not block account deletion', r.ok === true)
 }
 
 {

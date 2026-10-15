@@ -4,6 +4,8 @@ import { supabase } from '../lib/supabaseClient'
 import type { Recipe } from '../types/recipe'
 import { recordShare } from '../lib/shares'
 import type { ShareChannel } from '../lib/shares'
+import { dishPhotoFile, dishPhotoUrl, removeDishPhoto } from '../lib/dishPhoto'
+import { DishPhotoPrompt } from '../components/DishPhotoPrompt'
 
 export function SavedDetailPage() {
   const { id } = useParams()
@@ -13,6 +15,11 @@ export function SavedDetailPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [shareMsg, setShareMsg] = useState<string | null>(null)
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null)
+  // Loaded ahead of time: iOS only opens the share sheet straight from a tap,
+  // so there is no time to download the photo after the button is pressed.
+  const [photoFile, setPhotoFile] = useState<File | null>(null)
+  const [photoVersion, setPhotoVersion] = useState(0) // bumps when a photo is replaced at the same path
 
   useEffect(() => {
     const run = async () => {
@@ -27,6 +34,22 @@ export function SavedDetailPage() {
     run()
   }, [id])
 
+  const photoPath = recipe?.photo_path ?? null
+  const recipeTitle = recipe?.title ?? ''
+  useEffect(() => {
+    setPhotoUrl(null)
+    setPhotoFile(null)
+    if (!photoPath) return
+    let live = true
+    dishPhotoUrl(photoPath).then((u) => { if (live) setPhotoUrl(u) })
+    dishPhotoFile(photoPath, recipeTitle).then((f) => { if (live) setPhotoFile(f) })
+    return () => { live = false }
+  }, [photoPath, recipeTitle, photoVersion])
+
+  // Only when the device can put a photo in the share sheet.
+  const canSharePhoto = (file: File | null): file is File =>
+    !!file && typeof navigator !== 'undefined' && !!navigator.canShare && navigator.canShare({ files: [file] })
+
   const onDelete = async () => {
     if (!id) return
     setBusy(true)
@@ -34,6 +57,7 @@ export function SavedDetailPage() {
     const { error } = await supabase.from('recipes').delete().eq('id', id)
     setBusy(false)
     if (error) return setError(error.message)
+    if (recipe?.photo_path) await removeDishPhoto(recipe.photo_path).catch(() => {})
     nav('/saved', { replace: true })
   }
 
@@ -62,6 +86,35 @@ export function SavedDetailPage() {
   const fbHref = `https://www.facebook.com/sharer/sharer.php?u=${enc(APP_LINK)}`
   const liHref = `https://www.linkedin.com/sharing/share-offsite/?url=${enc(APP_LINK)}`
 
+  // Photo + full recipe through the share sheet. Web links (wa.me, X, Facebook)
+  // can't carry a photo, so with a photo every button goes this way. Instagram
+  // and Facebook drop text from the share sheet, so the recipe is also copied
+  // for pasting as the caption.
+  const sharePhoto = async (channel: ShareChannel, file: File, label?: string) => {
+    setShareMsg(null)
+    navigator.clipboard?.writeText(fullRecipeText).catch(() => {}) // not awaited: keep the tap fresh for share()
+    try {
+      await navigator.share({ files: [file], title: recipe?.title ?? 'ShareChef AI', text: fullRecipeText })
+    } catch {
+      return // user dismissed the share sheet
+    }
+    const earned = await recordShare(channel, id ?? null)
+    const pick = label ? `Pick ${label} in the share sheet. ` : ''
+    setShareMsg(
+      `${earned ? '⭐ +1 Micheli Star! ' : ''}${pick}Recipe copied too, paste it as your caption if it's missing.${earned ? '' : ' Sign in to earn Micheli Stars.'}`
+    )
+  }
+
+  // Channel buttons: with a photo, open the share sheet; without, the old link.
+  const onChannel = (channel: ShareChannel, label: string, fallback: () => void) => (e: React.MouseEvent) => {
+    if (canSharePhoto(photoFile)) {
+      e.preventDefault()
+      void sharePhoto(channel, photoFile, label)
+      return
+    }
+    fallback()
+  }
+
   const copyAndOpen = async (channel: ShareChannel, appUrl: string) => {
     setShareMsg(null)
     try {
@@ -87,6 +140,7 @@ export function SavedDetailPage() {
 
   const onShare = async () => {
     setShareMsg(null)
+    if (canSharePhoto(photoFile)) return sharePhoto('native', photoFile)
     try {
       if (typeof navigator !== 'undefined' && navigator.share) {
         await navigator.share({ title: recipe?.title ?? 'ShareChef AI', text: fullRecipeText })
@@ -130,6 +184,17 @@ export function SavedDetailPage() {
             </div>
           </div>
 
+          {photoUrl && <img className="dish-photo" src={photoUrl} alt={`My ${recipe.title}`} />}
+          <DishPhotoPrompt
+            userId={recipe.user_id}
+            recipeId={recipe.id}
+            replace={!!recipe.photo_path}
+            onSaved={(path) => {
+              setRecipe({ ...recipe, photo_path: path })
+              setPhotoVersion((v) => v + 1)
+            }}
+          />
+
           <div className="recipe-cols">
             <div>
               <h4>Ingredients</h4>
@@ -143,16 +208,18 @@ export function SavedDetailPage() {
 
           <div className="share-block stack" style={{ borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 12 }}>
             <div className="section-title">Share this creation</div>
-            <div className="muted" style={{ marginTop: -4, marginBottom: 6 }}>Post to Instagram, TikTok, and more 🍳</div>
+            <div className="muted" style={{ marginTop: -4, marginBottom: 6 }}>
+              {photoUrl ? 'Your photo and the full recipe go out together 🍳' : 'Post to Instagram, TikTok, and more 🍳'}
+            </div>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
               <button type="button" className="btn btn-primary" onClick={onShare}>📤 Share</button>
-              <a className="btn btn-ghost" href={waHref} target="_blank" rel="noopener noreferrer" onClick={() => trackShare('whatsapp')}>WhatsApp</a>
-              <a className="btn btn-ghost" href={xHref} target="_blank" rel="noopener noreferrer" onClick={() => trackShare('x')}>X</a>
-              <a className="btn btn-ghost" href={fbHref} target="_blank" rel="noopener noreferrer" onClick={() => trackShare('facebook')}>Facebook</a>
-              <a className="btn btn-ghost" href={liHref} target="_blank" rel="noopener noreferrer" onClick={() => trackShare('linkedin')}>LinkedIn</a>
-              <button type="button" className="btn btn-ghost" onClick={() => copyAndOpen('instagram', 'https://www.instagram.com/')}>Instagram</button>
-              <button type="button" className="btn btn-ghost" onClick={() => copyAndOpen('tiktok', 'https://www.tiktok.com/')}>TikTok</button>
-              <button type="button" className="btn btn-ghost" onClick={() => copyAndOpen('youtube', 'https://www.youtube.com/')}>YouTube</button>
+              <a className="btn btn-ghost" href={waHref} target="_blank" rel="noopener noreferrer" onClick={onChannel('whatsapp', 'WhatsApp', () => trackShare('whatsapp'))}>WhatsApp</a>
+              <a className="btn btn-ghost" href={xHref} target="_blank" rel="noopener noreferrer" onClick={onChannel('x', 'X', () => trackShare('x'))}>X</a>
+              <a className="btn btn-ghost" href={fbHref} target="_blank" rel="noopener noreferrer" onClick={onChannel('facebook', 'Facebook', () => trackShare('facebook'))}>Facebook</a>
+              <a className="btn btn-ghost" href={liHref} target="_blank" rel="noopener noreferrer" onClick={onChannel('linkedin', 'LinkedIn', () => trackShare('linkedin'))}>LinkedIn</a>
+              <button type="button" className="btn btn-ghost" onClick={onChannel('instagram', 'Instagram', () => copyAndOpen('instagram', 'https://www.instagram.com/'))}>Instagram</button>
+              <button type="button" className="btn btn-ghost" onClick={onChannel('tiktok', 'TikTok', () => copyAndOpen('tiktok', 'https://www.tiktok.com/'))}>TikTok</button>
+              <button type="button" className="btn btn-ghost" onClick={onChannel('youtube', 'YouTube', () => copyAndOpen('youtube', 'https://www.youtube.com/'))}>YouTube</button>
             </div>
             {shareMsg && <div className="muted" style={{ marginTop: 4 }}>{shareMsg}</div>}
           </div>

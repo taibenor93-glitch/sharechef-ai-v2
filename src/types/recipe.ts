@@ -8,5 +8,6 @@ export type Recipe = {
   cook_time_minutes: number | null
   servings: number | null
   tags: string[] | null
+  photo_path: string | null
   created_at: string
 }
