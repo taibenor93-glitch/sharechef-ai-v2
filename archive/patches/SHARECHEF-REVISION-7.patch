@@ -1,0 +1,695 @@
+diff --git a/rev6_work/SHARECHEF-REVISION-7-CORRECTION.md b/SHARECHEF-REVISION-7-CORRECTION.md
+new file mode 100644
+index 0000000..cad6004
+--- /dev/null
++++ b/SHARECHEF-REVISION-7-CORRECTION.md
+@@ -0,0 +1,44 @@
++# ShareChef Phase 1 Analytics — Revision 7 Correction
++
++Status: local correction package only. Nothing has been pushed, deployed, enabled, or applied to production.
++
++## Corrected blockers
++
++1. Account deletion now suspends analytics and waits for in-flight deliveries before the server-side purge begins.
++2. Local cleanup removes every queued event carrying the retired installation ID, including anonymous and shared-device events, plus every event bound to the deleted account.
++3. All identity-link guards are cleared when the installation identity rotates, preventing stale guards from blocking future links.
++4. The environment-controlled fake-authentication path was removed from production server code. Tests now inject an offline verifier in-process.
++5. Recent reauthentication uses the verified JWT's password `amr` timestamp, not account-wide `last_sign_in_at`.
++6. Client logout uses explicit local scope after deletion.
++7. A lost/ambiguous deletion response retires local identifiers and signs the user out, preventing old analytics from being resurrected. The user can sign back in to verify whether the account still exists.
++8. The repository migration no longer creates or enables RLS on `shares` without the verified production grants and policies.
++
++## Files corrected
++
++- `server.js`
++- `src/lib/events.ts`
++- `src/pages/Preferences.tsx`
++- `supabase/migrations/20260816100000_reconcile_shares_and_recipes.sql`
++- `tests/account-delete.test.mjs`
++- `tests/account-local.test.mjs`
++
++`src/lib/session.ts`, the app-events cascade migration, and the retention cron migration required no correction in this pass and remain included in the full code package.
++
++## Verification completed here
++
++- JavaScript syntax checks passed for `server.js`, `tests/account-delete.test.mjs`, and `tests/account-local.test.mjs`.
++- Static scan confirms production server code contains no `SC_TEST_FAKE_AUTH` path.
++- Static scan confirms the unsafe `shares` creation/RLS statements are absent from the reconciliation migration.
++
++## Verification still required in the real ShareChef repository
++
++After applying the patch on Tai's Mac:
++
++1. Run `node tests/account-delete.test.mjs`.
++2. Run `node tests/account-local.test.mjs`.
++3. Run the original session, client-events, and events suites.
++4. Run the production build.
++5. Confirm all analytics switches remain OFF.
++6. Do not apply migrations, push, or deploy.
++
++The production `shares` grants, RLS enabled state, and policies still require a metadata-only audit before a complete baseline migration can be written.
+diff --git a/server.js b/server.js
+index a351ab6..d12b3b4 100644
+--- a/server.js
++++ b/server.js
+@@ -13,7 +13,7 @@ dotenv.config()
+ const __filename = fileURLToPath(import.meta.url)
+ const __dirname = dirname(__filename)
+ 
+-const app = express()
++export const app = express()
+ const server = createServer(app)
+ const PORT = process.env.PORT || 3000
+ 
+@@ -64,10 +64,10 @@ app.use('/api/events', (err, _req, res, _next) => {
+ })
+ 
+ // ── Account deletion (Revision 6) ────────────────────────────────────────────
+-// PERMANENT, privacy-first account deletion. Requires a RECENT password
+-// sign-in: Supabase sets last_sign_in_at only on a genuine sign-in
+-// (signInWithPassword) — a silently refreshed JWT does NOT update it, so a
+-// long-lived stolen session can never delete an account without the password.
++// PERMANENT, privacy-first account deletion. Requires a RECENT password method
++// entry in the verified JWT's `amr` claim. Refreshing a session can issue a new
++// token but does not turn the original authentication method timestamp into a
++// new password proof.
+ // The password itself goes only from the client to Supabase auth; this server
+ // never sees, accepts, or logs it.
+ // Analytics removal is explicit and privacy-first (reviewer-approved): every
+@@ -88,13 +88,17 @@ function deleteRateLimited(key) {
+   return b.count > DELETE_MAX_PER_HOUR
+ }
+ 
+-// True only for a genuine, RECENT password sign-in. Refresh-only sessions keep
+-// their original last_sign_in_at and therefore fail this check.
+-function isRecentSignIn(lastSignInAt, now = Date.now()) {
+-  const t = Date.parse(String(lastSignInAt ?? ''))
+-  if (!Number.isFinite(t)) return false
+-  if (t > now + 60_000) return false // clock skew tolerance; far-future is invalid
+-  return now - t <= REAUTH_WINDOW_MS
++// Supabase JWT `amr` timestamps are epoch seconds. Require a password entry in
++// the narrow window; account-wide last_sign_in_at is not sufficient because a
++// login on another device could otherwise authorize this token.
++function isRecentPasswordAuth(amr, now = Date.now()) {
++  if (!Array.isArray(amr)) return false
++  return amr.some((entry) => {
++    if (!entry || entry.method !== 'password' || !Number.isFinite(entry.timestamp)) return false
++    const t = Number(entry.timestamp) * 1000
++    if (t > now + 60_000) return false
++    return now - t <= REAUTH_WINDOW_MS
++  })
+ }
+ 
+ // Admin client (service-role) — created lazily, server-side only. Independent of
+@@ -110,23 +114,31 @@ function adminClient() {
+   return adminDb
+ }
+ 
+-// Verified identity for deletion: id + last_sign_in_at from the auth server.
+-// SC_TEST_FAKE_AUTH=1 is a TEST-ONLY seam (never set in production): accepts
+-// "test:<uuid>:<epochMs>" bearer tokens with zero network. Gated hard on env.
++function decodeJwtPayload(token) {
++  try {
++    const parts = String(token).split('.')
++    if (parts.length !== 3) return null
++    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
++  } catch { return null }
++}
++
++// Verify the token with Supabase first, then read its signed claims. There is
++// deliberately no environment-controlled fake-token path in production code.
+ async function verifyUserForDeletion(token) {
+-  if (process.env.SC_TEST_FAKE_AUTH === '1' && typeof token === 'string' && token.startsWith('test:')) {
+-    const [, id, ms] = token.split(':')
+-    if (UUID_RE.test(String(id))) return { id: String(id), last_sign_in_at: new Date(Number(ms)).toISOString() }
+-    return null
+-  }
+   if (!supabaseAuth || !token) return null
+   try {
+     const { data, error } = await supabaseAuth.auth.getUser(token)
+     if (error || !data?.user) return null
+-    return { id: data.user.id, last_sign_in_at: data.user.last_sign_in_at ?? null }
++    const claims = decodeJwtPayload(token)
++    if (!claims || claims.sub !== data.user.id) return null
++    return { id: data.user.id, amr: claims.amr }
+   } catch { return null }
+ }
+ 
++// In-process dependency seam for offline tests. It is unreachable over HTTP
++// and cannot be activated by a production environment variable.
++let deletionUserVerifier = verifyUserForDeletion
++
+ // Core deletion, separated for direct testing with a fake db. Idempotent and
+ // retry-safe: re-running any step removes nothing new; after a partial failure
+ // the retry is safe because analytics disappearing first is the privacy-correct
+@@ -163,9 +175,9 @@ app.post('/api/account/delete', express.json({ limit: '1kb' }), async (req, res)
+       return res.status(400).json({ error: 'no body fields accepted' })
+     }
+     if (deleteRateLimited(req.ip || 'unknown')) return res.status(429).json({ error: 'rate limited' })
+-    const user = await verifyUserForDeletion(token)
++    const user = await deletionUserVerifier(token)
+     if (!user) return res.status(401).json({ error: 'invalid token' })
+-    if (!isRecentSignIn(user.last_sign_in_at)) {
++    if (!isRecentPasswordAuth(user.amr)) {
+       return res.status(403).json({ error: 'recent sign-in required' })
+     }
+     const db = adminClient()
+@@ -1107,4 +1119,14 @@ if (!process.env.SC_TEST_NO_LISTEN) {
+ }
+ 
+ // Test-only surface (harmless in production; used by tests/ with SC_TEST_NO_LISTEN=1).
+-export const __test = { validateEvent, EVENT_NAMES_CLIENT, EVENT_NAMES_SERVER, emitServerEvent, performAccountDeletion, isRecentSignIn }
++export const __test = {
++  validateEvent,
++  EVENT_NAMES_CLIENT,
++  EVENT_NAMES_SERVER,
++  emitServerEvent,
++  performAccountDeletion,
++  isRecentPasswordAuth,
++  setDeletionUserVerifier(fn) { deletionUserVerifier = fn },
++  resetDeletionUserVerifier() { deletionUserVerifier = verifyUserForDeletion },
++  resetDeleteRateLimit() { deleteBuckets.clear() },
++}
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index 9c4402b..c4bb0e4 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -56,6 +56,8 @@ const MAX_ATTEMPTS = 5
+ let retryQueue: QueueItem[] = []
+ let outboxLoaded = false
+ let flushing = false
++let privacySuspended = false
++const inFlightDeliveries = new Set<Promise<SendResult>>()
+ // Serialized persistence: concurrent writers append to this chain so no write
+ // overwrites another within this context (cross-tab remains last-writer-wins,
+ // documented as best-effort like the rest of web storage).
+@@ -147,30 +149,36 @@ const preInitQueue: Array<() => void> = []
+ let fetchImpl: typeof fetch = (...args) => fetch(...args)
+ 
+ type SendResult = 'delivered' | 'retriable' | 'rejected'
+-async function sendOnce(body: EventBody, authToken: string | null): Promise<SendResult> {
+-  try {
+-    const res = await fetchImpl(`${API_BASE}/api/events`, {
+-      method: 'POST',
+-      headers: {
+-        'Content-Type': 'application/json',
+-        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+-      },
+-      body: JSON.stringify(body),
+-      keepalive: true,
+-    })
+-    if (res.status === 429 || res.status >= 500) return 'retriable'
+-    if (!res.ok) return 'rejected' // validation/auth 4xx: never retried
+-    const json = await res.json().catch(() => null)
+-    if (json?.stored === true) return 'delivered'
+-    if (json?.reason === 'duplicate') return 'delivered' // already in the database
+-    return 'rejected' // e.g. kill switch off server-side: no retry loop
+-  } catch {
+-    return 'retriable' // network failure
+-  }
++function sendOnce(body: EventBody, authToken: string | null): Promise<SendResult> {
++  if (privacySuspended) return Promise.resolve('rejected')
++  const delivery = (async (): Promise<SendResult> => {
++    try {
++      const res = await fetchImpl(`${API_BASE}/api/events`, {
++        method: 'POST',
++        headers: {
++          'Content-Type': 'application/json',
++          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
++        },
++        body: JSON.stringify(body),
++        keepalive: true,
++      })
++      if (res.status === 429 || res.status >= 500) return 'retriable'
++      if (!res.ok) return 'rejected' // validation/auth 4xx: never retried
++      const json = await res.json().catch(() => null)
++      if (json?.stored === true) return 'delivered'
++      if (json?.reason === 'duplicate') return 'delivered' // already in the database
++      return 'rejected' // e.g. kill switch off server-side: no retry loop
++    } catch {
++      return 'retriable' // network failure
++    }
++  })()
++  inFlightDeliveries.add(delivery)
++  void delivery.finally(() => inFlightDeliveries.delete(delivery))
++  return delivery
+ }
+ 
+ function enqueueRetry(item: QueueItem): void {
+-  if (!ENABLED) return // kill switch OFF: no new entries (existing storage untouched)
++  if (!ENABLED || privacySuspended) return // deletion suspension never creates new entries
+   if (retryQueue.length >= MAX_QUEUE) return // bounded: drop, never grow
+   retryQueue.push(item)
+   persistOutbox()
+@@ -182,7 +190,7 @@ function setGuard(guardKey?: string): void {
+ }
+ 
+ async function flushRetryQueue(): Promise<void> {
+-  if (!ENABLED || flushing) return // kill switch OFF: never flushes, queue left as-is
++  if (!ENABLED || flushing || privacySuspended) return // deletion suspension never flushes
+   flushing = true
+   try {
+     await loadOutbox()
+@@ -244,7 +252,7 @@ function buildBody(event: EventName, props?: { ingredient_count?: number; channe
+ 
+ export function track(event: EventName, props?: { ingredient_count?: number; channel?: string }, authToken?: string | null): void {
+   try {
+-    if (!ENABLED) { if (DEBUG) console.log('[events:off]', event, props); return }
++    if (!ENABLED || privacySuspended) { if (DEBUG) console.log('[events:off]', event, props); return }
+     if (!ALLOWED_PROPS[event]) return
+     const emit = () => {
+       const body = buildBody(event, props)
+@@ -294,7 +302,7 @@ export function voiceActivity(): void {
+  *  "duplicate" IS confirmation. DB unique (anon,user) index backs it all. */
+ export function linkIdentityOnce(userId: string, authToken: string | null): void {
+   try {
+-    if (!ENABLED || !userId || !authToken) return
++    if (!ENABLED || privacySuspended || !userId || !authToken) return
+     const guard = `sc_evt_linked_${userId.toLowerCase()}`
+     let already: string | null = null
+     try { already = window.localStorage.getItem(guard) } catch { /* ignore */ }
+@@ -311,20 +319,44 @@ export function linkIdentityOnce(userId: string, authToken: string | null): void
+   } catch { /* ignore */ }
+ }
+ 
+-/** Account-deletion local purge: remove every queued analytics item bound to
+- *  the deleted account and clear its identity-link guard. Runs REGARDLESS of
+- *  the kill switch — this is privacy cleanup, not analytics. Anonymous queue
+- *  items are left alone (they belong to the installation, whose identity is
+- *  rotated separately by session.resetIdentity()). */
++/** Pause analytics before the destructive server request. Waiting for current
++ * deliveries prevents an old-install event from landing after the server-side
++ * privacy purge. No new delivery or retry may start while suspended. */
++export async function suspendAnalyticsForAccountDeletion(): Promise<void> {
++  privacySuspended = true
++  await Promise.allSettled([...inFlightDeliveries])
++}
++
++/** Resume only after a definite server rejection that left the account intact. */
++export function resumeAnalyticsAfterFailedDeletion(): void { privacySuspended = false }
++
++/** Account-deletion local purge: remove every queued item for the deleted
++ * account OR the installation being retired, including anonymous/shared-device
++ * items. Also clear pending pre-init emissions and all legacy/current identity
++ * guards so a newly rotated installation can link accounts correctly. */
+ export async function purgeAccountLocal(userId: string): Promise<void> {
+   try {
+     const uid = String(userId).toLowerCase()
+     if (!UUID_RE.test(uid)) return
++    await suspendAnalyticsForAccountDeletion()
++    const retiredAnonId = getAnonId().toLowerCase()
+     await loadOutbox()
+-    retryQueue = retryQueue.filter((i) => i.requiredUserId !== uid)
++    retryQueue = retryQueue.filter((i) =>
++      i.requiredUserId !== uid && String(i.body.anon_id).toLowerCase() !== retiredAnonId
++    )
++    preInitQueue.length = 0
+     persistOutbox()
+     await persistChain // storage settled before the caller signs out
+-    try { window.localStorage.removeItem(`sc_evt_linked_${uid}`) } catch { /* ignore */ }
++    try {
++      // Guards were historically keyed only by user id. Current guards include
++      // anon id. Clear both forms (and every other install-link guard) because
++      // this installation identity is being retired.
++      for (let i = window.localStorage.length - 1; i >= 0; i--) {
++        const key = window.localStorage.key(i)
++        if (key?.startsWith('sc_evt_linked_')) window.localStorage.removeItem(key)
++      }
++      window.localStorage.removeItem(`sc_evt_linked_${uid}`)
++    } catch { /* ignore */ }
+   } catch { /* cleanup must never throw */ }
+ }
+ 
+@@ -337,6 +369,7 @@ export const __test = {
+   queueSize() { return retryQueue.length },
+   queueIds() { return retryQueue.map((i) => i.body.id) },
+   queueRequired() { return retryQueue.map((i) => i.requiredUserId ?? null) },
++  privacySuspended() { return privacySuspended },
+   clearQueue() { retryQueue.length = 0 },
+   flush: flushRetryQueue,
+   loadOutbox,
+diff --git a/src/pages/Preferences.tsx b/src/pages/Preferences.tsx
+index 26d8fa6..a195345 100644
+--- a/src/pages/Preferences.tsx
++++ b/src/pages/Preferences.tsx
+@@ -3,7 +3,11 @@ import { useNavigate } from 'react-router-dom'
+ import { useAuth } from '../hooks/useAuth'
+ import { supabase } from '../lib/supabaseClient'
+ import { API_BASE } from '../lib/apiBase'
+-import { purgeAccountLocal } from '../lib/events'
++import {
++  purgeAccountLocal,
++  resumeAnalyticsAfterFailedDeletion,
++  suspendAnalyticsForAccountDeletion,
++} from '../lib/events'
+ import { resetIdentity } from '../lib/session'
+ 
+ export function PreferencesPage() {
+@@ -12,8 +16,8 @@ export function PreferencesPage() {
+ 
+   // ── Account deletion (Revision 6) ──────────────────────────────────────────
+   // Password re-entry goes ONLY to Supabase auth (signInWithPassword) — never
+-  // to the ShareChef server. The fresh sign-in updates last_sign_in_at, which
+-  // the server requires within a narrow window before any deletion.
++  // to the ShareChef server. The server requires the verified JWT's password
++  // authentication-method timestamp to fall inside a narrow window.
+   const [delStep, setDelStep] = useState<'closed' | 'form' | 'working' | 'done'>('closed')
+   const [delPassword, setDelPassword] = useState('')
+   const [delConfirmed, setDelConfirmed] = useState(false)
+@@ -37,6 +41,9 @@ export function PreferencesPage() {
+         setDelStep('form')
+         return
+       }
++      // Stop and drain analytics before the server purges this installation.
++      // Otherwise an already-running delivery could land after the purge.
++      await suspendAnalyticsForAccountDeletion()
+       // 2) Server-side permanent deletion, account derived from the token only.
+       let res: Response | null = null
+       try {
+@@ -49,7 +56,19 @@ export function PreferencesPage() {
+           body: '{}',
+         })
+       } catch { res = null }
+-      if (!res || !res.ok) {
++      if (!res) {
++        // The request may have completed even though its response was lost.
++        // Retire local identifiers and sign out rather than risk resurrecting
++        // pre-deletion analytics. If the account still exists, the user can
++        // sign back in and retry safely.
++        await purgeAccountLocal(userId)
++        await resetIdentity()
++        await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined)
++        navigate('/login', { replace: true, state: { message: 'We could not confirm the deletion. Sign in again to verify your account status.' } })
++        return
++      }
++      if (!res.ok) {
++        resumeAnalyticsAfterFailedDeletion()
+         setDelError(
+           res?.status === 429
+             ? 'Too many attempts. Please wait an hour and try again.'
+@@ -61,9 +80,10 @@ export function PreferencesPage() {
+       // 3) Server confirmed. Erase the local session IMMEDIATELY — the old JWT
+       //    can remain technically valid until it expires, so nothing here may
+       //    keep using it. Then rotate the installation identity.
+-      try { await purgeAccountLocal(userId) } catch { /* never block sign-out */ }
+-      try { await resetIdentity() } catch { /* never block sign-out */ }
+-      try { await supabase.auth.signOut() } catch { /* local session is cleared regardless */ }
++      await purgeAccountLocal(userId)
++      await resetIdentity()
++      await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined)
++      setDelPassword('')
+       setDelStep('done')
+       setTimeout(() => navigate('/login', { replace: true }), 2200)
+     } catch {
+diff --git a/supabase/migrations/20260816100000_reconcile_shares_and_recipes.sql b/supabase/migrations/20260816100000_reconcile_shares_and_recipes.sql
+index 18b2c66..6045629 100644
+--- a/supabase/migrations/20260816100000_reconcile_shares_and_recipes.sql
++++ b/supabase/migrations/20260816100000_reconcile_shares_and_recipes.sql
+@@ -4,16 +4,17 @@
+ -- production and is fully idempotent: it no-ops wherever the target state
+ -- already holds, so applying it anywhere is safe.
+ 
+--- shares: existed in production without a repo migration. Captured 1:1.
+-create table if not exists public.shares (
+-  id uuid primary key default gen_random_uuid(),
+-  user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
+-  recipe_id text,
+-  channel text not null default 'native',
+-  created_at timestamptz not null default now()
+-);
+-
+-alter table public.shares enable row level security;
++-- shares exists in production, but its RLS policies and grants have not yet
++-- been captured. Deliberately do NOT create it or change RLS here: enabling RLS
++-- without the production policies could break sharing, while creating it with
++-- RLS disabled would expose data in a fresh environment. A separate verified
++-- baseline migration must capture columns, grants, RLS state, and every policy.
++do $$
++begin
++  if to_regclass('public.shares') is null then
++    raise notice 'public.shares is absent; verified shares baseline migration still required';
++  end if;
++end $$;
+ 
+ -- recipes.user_id: production already has ON DELETE CASCADE (the original repo
+ -- migration lacked the clause). Converge only when the rule differs.
+diff --git a/tests/account-delete.test.mjs b/tests/account-delete.test.mjs
+index 20d3256..fa0a274 100644
+--- a/tests/account-delete.test.mjs
++++ b/tests/account-delete.test.mjs
+@@ -1,11 +1,10 @@
+ // Account deletion endpoint + core-procedure tests (Revision 6).
+ // Run: node tests/account-delete.test.mjs
+-// HTTP phase spawns a real server with SUPABASE_URL='' (no auth client, no
+-// admin client, no network possible) and SC_TEST_FAKE_AUTH=1 (offline bearer
+-// tokens "test:<uuid>:<epochMs>"). Core phase imports server.js in-process
+-// (SC_TEST_NO_LISTEN=1) and drives performAccountDeletion against a FAKE db.
++// HTTP phase starts the exported Express app in-process with SUPABASE_URL=''
++// (no auth/admin client and no network possible) and injects a verifier through
++// an in-process-only test seam. Production contains no fake-token env path.
++// Core phase drives performAccountDeletion against a FAKE db.
+ // No live service is ever contacted.
+-import { spawn } from 'node:child_process'
+ import { randomUUID } from 'node:crypto'
+ import { readFileSync, readdirSync, statSync } from 'node:fs'
+ import { join } from 'node:path'
+@@ -17,16 +16,6 @@ function check(name, cond, detail = '') {
+   console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`)
+ }
+ 
+-function startServer(port, extraEnv) {
+-  const child = spawn('node', ['server.js'], {
+-    env: { ...process.env, PORT: String(port), SUPABASE_URL: '', SUPABASE_ANON_KEY: '', SUPABASE_SERVICE_KEY: '', EVENTS_ENABLED: '', SC_TEST_FAKE_AUTH: '1', ...extraEnv },
+-    stdio: ['ignore', 'pipe', 'pipe'],
+-  })
+-  child.stdout.on('data', () => {})
+-  child.stderr.on('data', () => {})
+-  return child
+-}
+-
+ async function del(port, { token, body } = {}) {
+   const res = await fetch(`http://127.0.0.1:${port}/api/account/delete`, {
+     method: 'POST',
+@@ -42,8 +31,19 @@ const freshToken = (id = randomUUID()) => `test:${id}:${Date.now()}`
+ const staleToken = (id = randomUUID()) => `test:${id}:${Date.now() - 10 * 60 * 1000}` // 10 min old
+ 
+ // ── Phase A: HTTP guards (offline server) ────────────────────────────────────
+-const srv = startServer(3111)
+-await sleep(2500)
++process.env.SC_TEST_NO_LISTEN = '1'
++process.env.SUPABASE_URL = ''
++process.env.SUPABASE_ANON_KEY = ''
++process.env.SUPABASE_SERVICE_KEY = ''
++process.env.EVENTS_ENABLED = ''
++const { app, __test } = await import('../server.js')
++__test.setDeletionUserVerifier(async (token) => {
++  const [prefix, id, ms] = String(token).split(':')
++  if (prefix !== 'test' || !/^[0-9a-f-]{36}$/i.test(id) || !Number.isFinite(Number(ms))) return null
++  return { id, amr: [{ method: 'password', timestamp: Number(ms) / 1000 }] }
++})
++const srv = app.listen(3111)
++await sleep(100)
+ {
+   const r = await del(3111, {})
+   check('missing JWT → 401', r.status === 401)
+@@ -64,21 +64,20 @@ await sleep(2500)
+   const r = await del(3111, { token: freshToken() })
+   check('recent sign-in passes reauth gate (503 only because no service key here)', r.status === 503 && r.json?.error === 'deletion not configured')
+ }
+-srv.kill()
++await new Promise((resolve) => srv.close(resolve))
+ 
+ // Rate limiting on its own server so counts are deterministic.
+-const rlSrv = startServer(3112)
+-await sleep(2500)
++__test.resetDeleteRateLimit()
++const rlSrv = app.listen(3112)
++await sleep(100)
+ {
+   const statuses = []
+   for (let i = 0; i < 6; i++) statuses.push((await del(3112, { token: freshToken() })).status)
+   check('rate limit: first 5 pass the limiter, 6th → 429', statuses.slice(0, 5).every((s) => s === 503) && statuses[5] === 429, statuses.join(','))
+ }
+-rlSrv.kill()
++await new Promise((resolve) => rlSrv.close(resolve))
+ 
+ // ── Phase B: core deletion procedure with a fake db (in-process) ─────────────
+-process.env.SC_TEST_NO_LISTEN = '1'
+-const { __test } = await import('../server.js')
+ 
+ function makeFakeDb(rows, opts = {}) {
+   const calls = { deletedUsers: [], softFlags: [] }
+@@ -178,11 +177,13 @@ function scenarioRows() {
+ {
+   // Reauth window logic (pure).
+   const now = Date.now()
+-  check('isRecentSignIn: just signed in → true', __test.isRecentSignIn(new Date(now - 5_000).toISOString(), now) === true)
+-  check('isRecentSignIn: 4m59s ago → true', __test.isRecentSignIn(new Date(now - 299_000).toISOString(), now) === true)
+-  check('isRecentSignIn: 6 minutes ago → false (refresh-only session blocked)', __test.isRecentSignIn(new Date(now - 360_000).toISOString(), now) === false)
+-  check('isRecentSignIn: missing/garbage → false', __test.isRecentSignIn(null, now) === false && __test.isRecentSignIn('nope', now) === false)
+-  check('isRecentSignIn: far-future timestamp → false', __test.isRecentSignIn(new Date(now + 120_000).toISOString(), now) === false)
++  const amr = (method, ms) => [{ method, timestamp: ms / 1000 }]
++  check('recent password AMR: just signed in → true', __test.isRecentPasswordAuth(amr('password', now - 5_000), now) === true)
++  check('recent password AMR: 4m59s ago → true', __test.isRecentPasswordAuth(amr('password', now - 299_000), now) === true)
++  check('stale password AMR → false', __test.isRecentPasswordAuth(amr('password', now - 360_000), now) === false)
++  check('fresh token-refresh AMR is not password proof', __test.isRecentPasswordAuth(amr('token_refresh', now - 1_000), now) === false)
++  check('missing/garbage AMR → false', __test.isRecentPasswordAuth(null, now) === false && __test.isRecentPasswordAuth('nope', now) === false)
++  check('far-future password timestamp → false', __test.isRecentPasswordAuth(amr('password', now + 120_000), now) === false)
+ }
+ 
+ // ── Phase C: 12-month purge semantics (predicate simulation) ─────────────────
+@@ -204,7 +205,7 @@ function scenarioRows() {
+ // ── Phase D: migration content checks ────────────────────────────────────────
+ {
+   const rec = readFileSync('supabase/migrations/20260816100000_reconcile_shares_and_recipes.sql', 'utf8')
+-  check('migration: shares captured idempotently with CASCADE', rec.includes('create table if not exists public.shares') && rec.includes('on delete cascade'))
++  check('migration: shares left untouched until grants/RLS policies are verified', !rec.includes('create table if not exists public.shares') && !rec.includes('alter table public.shares enable row level security'))
+   check('migration: recipes FK converges to CASCADE only when different', rec.includes('recipes_user_id_fkey') && rec.includes('confdeltype') && rec.includes("is distinct from 'c'"))
+   const ae = readFileSync('supabase/migrations/20260816101000_app_events_user_cascade.sql', 'utf8')
+   check('migration: app_events.user_id defense-in-depth CASCADE, idempotent', ae.includes('app_events_user_id_fkey') && ae.includes('on delete cascade') && ae.includes('confdeltype'))
+@@ -226,6 +227,8 @@ function scenarioRows() {
+   }
+   walk('src')
+   check('service key never referenced in client source', offenders.length === 0, offenders.join(','))
++  const serverSource = readFileSync('server.js', 'utf8')
++  check('production server contains no env-controlled fake-auth path', !serverSource.includes('SC_TEST_FAKE_AUTH'))
+ }
+ 
+ const passed = results.filter((r) => r.pass).length
+diff --git a/tests/account-local.test.mjs b/tests/account-local.test.mjs
+index 04abc4a..202b388 100644
+--- a/tests/account-local.test.mjs
++++ b/tests/account-local.test.mjs
+@@ -28,6 +28,8 @@ function makeStorage() {
+     getItem: (k) => (store.has(k) ? store.get(k) : null),
+     setItem: (k, v) => store.set(k, String(v)),
+     removeItem: (k) => store.delete(k),
++    key: (i) => [...store.keys()][i] ?? null,
++    get length() { return store.size },
+     _raw: store,
+   }
+ }
+@@ -61,11 +63,13 @@ const failFetch = async () => ({ ok: false, status: 500, json: async () => null
+ const A = '11111111-1111-4111-8111-111111111111'
+ const B = '22222222-2222-4222-8222-222222222222'
+ 
+-// 1. purgeAccountLocal removes ONLY the deleted account's queued items
++// 1. Purge retires the entire installation: account-bound, shared-account,
++// and anonymous items carrying the old anon id are all removed.
+ {
+-  const { events } = await freshModules()
++  const { session, events } = await freshModules()
+   events.__test.setEnabled(true)
+   await events.__test.init()
++  const retiredAnon = session.getAnonId()
+   events.__test.setFetch(failFetch) // everything retriable → lands in the outbox
+   events.__test.dispatch(events.__test.buildBody('dish_saved'), makeJwt(A), true, A)
+   events.__test.dispatch(events.__test.buildBody('dish_saved'), makeJwt(B), true, B)
+@@ -74,42 +78,71 @@ const B = '22222222-2222-4222-8222-222222222222'
+   await events.__test.persistChainDone()
+   check('setup: three items queued (A, B, anonymous)', events.__test.queueSize() === 3)
+   await events.purgeAccountLocal(A)
+-  const required = events.__test.queueRequired()
+-  check('A\'s account-bound items removed', !required.includes(A))
+-  check('B\'s account-bound item survives', required.includes(B))
+-  check('anonymous item survives', required.includes(null))
++  check('all queued items for retired installation removed', events.__test.queueSize() === 0)
++  check('analytics remains suspended after privacy purge', events.__test.privacySuspended() === true)
+   const stored = JSON.parse(globalThis.window.localStorage.getItem('sc_evt_outbox') ?? '[]')
+-  check('persisted outbox reflects the purge', Array.isArray(stored) && stored.length === 2 && !stored.some((i) => i.requiredUserId === A))
++  check('persisted outbox contains no retired anon id', Array.isArray(stored) && !stored.some((i) => i.body?.anon_id === retiredAnon))
+ }
+ 
+-// 2. Identity-link guard cleared for the deleted account only
++// 2. Every identity-link guard is cleared because the installation rotates.
+ {
+-  const { events } = await freshModules()
++  const { session, events } = await freshModules()
+   events.__test.setEnabled(true)
+   await events.__test.init()
+-  globalThis.window.localStorage.setItem(`sc_evt_linked_${A}`, '1')
++  session.getAnonId()
++  globalThis.window.localStorage.setItem(`sc_evt_linked_${A}`, '1') // legacy guard
+   globalThis.window.localStorage.setItem(`sc_evt_linked_${B}`, '1')
++  globalThis.window.localStorage.setItem('unrelated', 'keep')
+   await events.purgeAccountLocal(A)
+-  check('deleted account\'s identity-link guard cleared', globalThis.window.localStorage.getItem(`sc_evt_linked_${A}`) === null)
+-  check('other account\'s guard untouched', globalThis.window.localStorage.getItem(`sc_evt_linked_${B}`) === '1')
++  check('legacy identity-link guard cleared', globalThis.window.localStorage.getItem(`sc_evt_linked_${A}`) === null)
++  check('shared-device identity-link guard cleared', globalThis.window.localStorage.getItem(`sc_evt_linked_${B}`) === null)
++  check('unrelated local storage survives', globalThis.window.localStorage.getItem('unrelated') === 'keep')
+ }
+ 
+ // 3. Purge works with the kill switch OFF (privacy cleanup is unconditional)
+ {
+-  const { events } = await freshModules()
++  const { session, events } = await freshModules()
+   events.__test.setEnabled(false)
++  await events.__test.init()
++  const retiredAnon = session.getAnonId()
++  const otherAnon = crypto.randomUUID()
+   // Pre-existing persisted outbox from an earlier enabled run:
+-  const item = (uid) => ({
+-    body: { id: crypto.randomUUID(), event: 'dish_saved', anon_id: crypto.randomUUID(), session_id: crypto.randomUUID(), app_version: '1.6.0' },
+-    needsAuth: true, attempts: 1, requiredUserId: uid,
++  const item = (uid, anonId, needsAuth = true) => ({
++    body: { id: crypto.randomUUID(), event: 'dish_saved', anon_id: anonId, session_id: crypto.randomUUID(), app_version: '1.6.0' },
++    needsAuth, attempts: 1, ...(uid ? { requiredUserId: uid } : {}),
+   })
+-  globalThis.window.localStorage.setItem('sc_evt_outbox', JSON.stringify([item(A), item(B)]))
++  globalThis.window.localStorage.setItem('sc_evt_outbox', JSON.stringify([
++    item(A, retiredAnon),
++    item(B, retiredAnon),
++    item(null, retiredAnon, false),
++    item(B, otherAnon),
++  ]))
+   await events.purgeAccountLocal(A)
+   const stored = JSON.parse(globalThis.window.localStorage.getItem('sc_evt_outbox') ?? '[]')
+-  check('kill switch OFF: purge still removes the deleted account\'s stored items', stored.length === 1 && stored[0].requiredUserId === B)
++  check('kill switch OFF: only other-install item survives', stored.length === 1 && stored[0].requiredUserId === B && stored[0].body.anon_id === otherAnon)
++}
++
++// 4. Suspension waits for an in-flight delivery and blocks new sends.
++{
++  const { events } = await freshModules()
++  events.__test.setEnabled(true)
++  await events.__test.init()
++  let release
++  events.__test.setFetch(() => new Promise((resolve) => {
++    release = () => resolve({ ok: true, status: 201, json: async () => ({ stored: true }) })
++  }))
++  events.__test.dispatch(events.__test.buildBody('app_opened'), null, false)
++  await sleep(10)
++  let suspendedDone = false
++  const suspension = events.suspendAnalyticsForAccountDeletion().then(() => { suspendedDone = true })
++  await sleep(10)
++  check('suspension waits for in-flight delivery', suspendedDone === false)
++  release()
++  await suspension
++  check('suspension completes after delivery settles', suspendedDone === true && events.__test.privacySuspended() === true)
+ }
+ 
+-// 4. resetIdentity rotates anon_id AND session_id, and persists the new anon id
++// 5. resetIdentity rotates anon_id AND session_id, and persists the new anon id
+ {
+   const { session } = await freshModules()
+   await session.initIdentity()
+@@ -123,7 +156,7 @@ const B = '22222222-2222-4222-8222-222222222222'
+   check('new anon_id persisted to storage', globalThis.window.localStorage.getItem('sc_anon_id') === anonAfter)
+ }
+ 
+-// 5. resetIdentity persists via Capacitor Preferences on native (never localStorage)
++// 6. resetIdentity persists via Capacitor Preferences on native (never localStorage)
+ {
+   const { session } = await freshModules()
+   const prefStore = new Map()
+@@ -142,7 +175,7 @@ const B = '22222222-2222-4222-8222-222222222222'
+   check('native: localStorage never received the anon id', globalThis.window.localStorage._raw.get('sc_anon_id') === undefined)
+ }
+ 
+-// 6. Invalid user id is a safe no-op
++// 7. Invalid user id is a safe no-op
+ {
+   const { events } = await freshModules()
+   globalThis.window.localStorage.setItem('sc_evt_outbox', JSON.stringify([{ body: { id: crypto.randomUUID(), event: 'dish_saved', anon_id: crypto.randomUUID(), session_id: crypto.randomUUID(), app_version: '1.6.0' }, needsAuth: true, attempts: 1, requiredUserId: A }]))
+

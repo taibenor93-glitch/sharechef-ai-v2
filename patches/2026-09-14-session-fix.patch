@@ -1,0 +1,191 @@
+diff --git a/server.js b/server.js
+index 9085bd0..96d9f52 100644
+--- a/server.js
++++ b/server.js
+@@ -846,15 +846,27 @@ wss.on('connection', (browserWs, req) => {
+   // Live transcript of this session (final lines only), used for resume-after-lock.
+   const transcript = []
+   let linesSinceFlush = 0
++  let cookWrite = Promise.resolve()
++  const clearCurrentCook = () => {
++    cookWrite = cookWrite.then(() => {
++      if (authToken && user) return clearCookState(authToken, user.id)
++      if (guestId) clearGuestCookState(guestId)
++    })
++    return cookWrite
++  }
+   const flushCookState = () => {
+-    if (transcript.length === 0) return
++    if (intentionalEnd || transcript.length === 0) return
+     linesSinceFlush = 0
+-    if (authToken && user) saveCookState(authToken, user.id, transcript.slice(-14), sessionLanguage)
+-    else if (guestId) saveGuestCookState(guestId, transcript.slice(-14), sessionLanguage)
++    const lines = transcript.slice(-14)
++    cookWrite = cookWrite.then(() => {
++      if (intentionalEnd) return
++      if (authToken && user) return saveCookState(authToken, user.id, lines, sessionLanguage)
++      if (guestId) saveGuestCookState(guestId, lines, sessionLanguage)
++    })
+   }
+ 
+   const startOpenAI = () => {
+-    if (started) return
++    if (started || intentionalEnd || browserWs.readyState !== WebSocket.OPEN) return
+     started = true
+     let openaiHeartbeat = null
+ 
+@@ -870,7 +882,7 @@ wss.on('connection', (browserWs, req) => {
+     const resumedLanguage =
+       cookState && typeof cookState.language === 'string' && KNOWN_LANGUAGES.has(cookState.language)
+         ? cookState.language : null
+-    sessionLanguage = resumedLanguage || clientLanguage || profileLanguage || headerLanguage || 'English'
++    sessionLanguage = clientLanguage || profileLanguage || resumedLanguage || headerLanguage || 'English'
+     console.log(`[WS] session language: ${sessionLanguage} (resumed=${resumedLanguage || '—'}, pick=${clientLanguage || '—'}, profile=${profileLanguage || '—'}, device=${headerLanguage || '—'})`)
+     // NOTE (2026-08-04): the server used to push an `sc.session` status frame to
+     // the browser here, and a `language` hint into the transcriber below. Both
+@@ -952,6 +964,7 @@ wss.on('connection', (browserWs, req) => {
+   })
+ 
+   openaiWs.on('message', (data, isBinary) => {
++    if (intentionalEnd) return
+     if (browserWs.readyState === WebSocket.OPEN) browserWs.send(data, { binary: isBinary })
+     // Capture final transcript lines for resume-after-lock (signed-in users and tracked guests).
+     // Only frames that can carry a finished transcript are parsed — audio deltas are not.
+@@ -1020,8 +1033,8 @@ wss.on('connection', (browserWs, req) => {
+       try {
+         if (JSON.parse(text).type === 'end_session') {
+           intentionalEnd = true
+-          if (user && authToken) clearCookState(authToken, user.id)
+-          else if (guestId) clearGuestCookState(guestId)
++          clearTimeout(authTimer)
++          void clearCurrentCook()
+           return
+         }
+       } catch { /* fall through — treat as a normal frame */ }
+@@ -1061,6 +1074,7 @@ wss.on('connection', (browserWs, req) => {
+         }
+         console.log(`[WS] auth: ${user ? `user ${user.id}` : guestId ? 'guest (tracked)' : 'guest'}${profile ? ' (profile loaded)' : ''}${cookState ? ' (resuming cook)' : ''}${memory ? ' (memory loaded)' : ''}${isReconnect ? ' (reconnect)' : ''}${isTestSession ? ' (TEST MODEL)' : ''}`)
+         authInFlight = false
++        if (intentionalEnd) { await clearCurrentCook(); return }
+         startOpenAI()
+         return // the auth frame itself is never forwarded to OpenAI
+       }
+diff --git a/src/pages/Home.tsx b/src/pages/Home.tsx
+index e19c6cd..88d377b 100644
+--- a/src/pages/Home.tsx
++++ b/src/pages/Home.tsx
+@@ -107,7 +107,9 @@ export function HomePage() {
+     setVoiceError(null)
+     if (status === 'idle') {
+       startingRef.current = true
++      setStatus('connecting')
+       await v.unlockAudio()
++      if (!startingRef.current) return
+       // Hand the voice client a token PROVIDER, not a token — it re-fetches a
+       // fresh one on every connect and every automatic reconnect, so a stale
+       // token can never silently downgrade the session to guest.
+@@ -118,6 +120,8 @@ export function HomePage() {
+     } else {
+       startingRef.current = false
+       v.disconnect()
++      setLines([])
++      setServerAuth(null)
+     }
+   }
+ 
+diff --git a/src/voice/realtimeVoice.ts b/src/voice/realtimeVoice.ts
+index 81a909c..4fce619 100644
+--- a/src/voice/realtimeVoice.ts
++++ b/src/voice/realtimeVoice.ts
+@@ -134,7 +134,9 @@ export class RealtimeVoice {
+   }
+ 
+   private openSocket(): void {
+-    this.ws = new WebSocket(`${WS_BASE}/ws/realtime`)
++    if (this.intentionalEnd) return
++    const socket = new WebSocket(`${WS_BASE}/ws/realtime`)
++    this.ws = socket
+     this.cb.onStatus('connecting')
+     this.ws.onopen = async () => {
+       // Identify the signed-in user to the server before any audio flows.
+@@ -146,6 +148,7 @@ export class RealtimeVoice {
+       // Analytics identity must be settled BEFORE any identifier leaves the
+       // device — voice and app events from one launch share the same ids.
+       if (EVENTS_ON) { try { await initIdentity() } catch { /* identity optional */ } }
++      if (this.intentionalEnd || this.ws !== socket) return
+       const isReconnectAttempt = this.reconnectAttempts > 0
+       // Only tell the server "treat this as a real interrupted cook" once a
+       // conversation had actually started — otherwise a blip during the very
+@@ -171,6 +174,7 @@ export class RealtimeVoice {
+       }
+     }
+     this.ws.onmessage = (e) => {
++      if (this.intentionalEnd || this.ws !== socket) return
+       try {
+         this.handleEvent(JSON.parse(e.data as string))
+       } catch {
+@@ -181,6 +185,7 @@ export class RealtimeVoice {
+       /* the close handler that always follows decides whether to reconnect */
+     }
+     this.ws.onclose = () => {
++      if (this.ws !== socket) return
+       this.stopListening()
+       this.isPlayingAudio = false
+       if (!this.intentionalEnd && this.reconnectAttempts < 3) {
+@@ -209,10 +214,15 @@ export class RealtimeVoice {
+     }
+     this.stopListening()
+     this.isPlayingAudio = false
++    this.hasStartedConversation = false
++    this.nextPlayTime = 0
++    this.pendingTranscript = ''
+     // Tell the server this is a deliberate goodbye, not an interruption —
+     // a deliberate end closes the cook instead of resuming it next time.
+     this.wsSend({ type: 'end_session' })
+     if (this.ws) {
++      this.ws.onopen = null
++      this.ws.onmessage = null
+       this.ws.onclose = null
+       this.ws.close(1000)
+       this.ws = null
+@@ -245,13 +255,19 @@ export class RealtimeVoice {
+   }
+ 
+   async startListening(): Promise<void> {
+-    if (this.isListening) return
++    if (this.isListening || this.intentionalEnd) return
++    const socket = this.ws
+     try {
+       if (!this.micStream) {
+-        this.micStream = await navigator.mediaDevices.getUserMedia({
++        const stream = await navigator.mediaDevices.getUserMedia({
+           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+           video: false,
+         })
++        if (this.intentionalEnd || this.ws !== socket) {
++          stream.getTracks().forEach((track) => track.stop())
++          return
++        }
++        this.micStream = stream
+       }
+       if (!this.audioCtx) {
+         this.audioCtx = new (
+@@ -259,8 +275,10 @@ export class RealtimeVoice {
+         )()
+         await this.audioCtx!.audioWorklet.addModule('/audio-processor.js')
+       }
++      if (this.intentionalEnd || this.ws !== socket) return
+       if (this.audioCtx!.state === 'suspended') await this.audioCtx!.resume()
+ 
++      if (this.intentionalEnd || this.ws !== socket) return
+       this.sourceNode = this.audioCtx!.createMediaStreamSource(this.micStream!)
+       this.processorNode = new AudioWorkletNode(this.audioCtx!, 'pcm-audio-processor', {
+         processorOptions: { inputRate: this.audioCtx!.sampleRate },
+@@ -272,6 +290,7 @@ export class RealtimeVoice {
+       this.isListening = true
+       this.cb.onStatus('listening')
+     } catch (err: any) {
++      if (this.intentionalEnd || this.ws !== socket) return
+       console.error('startListening failed:', err?.name, err?.message)
+       const friendly = err?.name === 'NotAllowedError'
+         ? 'Micheli needs microphone access. Enable it in Settings > ShareChef > Microphone.'

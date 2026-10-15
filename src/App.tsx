@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
+import { useDeepLinks } from './hooks/useDeepLinks'
 import { startAnalyticsSession, foregroundBoundary, linkIdentityOnce, setAuthContextProvider } from './lib/events'
 import { supabase } from './lib/supabaseClient'
 import { Layout } from './components/Layout'
@@ -18,6 +19,11 @@ import { PricingPage } from './pages/Pricing'
 
 export default function App() {
   const { authed, session, loading } = useAuth()
+
+  // sharechef://open/<path> — App Store In-App Events and any other link
+  // that should land on a specific screen. Allowed paths live in
+  // src/lib/deepLink.ts; anything else falls back to home.
+  useDeepLinks()
 
   // Phase 1 events (no-ops unless VITE_EVENTS_ENABLED='true'): cold launch
   // always starts a new session; foreground return rotates only after the

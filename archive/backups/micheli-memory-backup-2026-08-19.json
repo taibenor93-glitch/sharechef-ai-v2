@@ -1,0 +1,8 @@
+{
+  "table": "micheli_memory",
+  "user_id": "6493c58c-c74b-4c55-9db0-da7530eb619b",
+  "updated_at": "2026-08-19 21:11:30.879+00",
+  "length": 464,
+  "summary": "The user enjoys cooking with chicken, rice, and enhancing dishes with cheese, especially Parmesan. They often steam broccoli and melt cheese on top. They prefer pan-searing chicken but continue to explore baking methods. They've expressed interest in creating stir-fry or chicken and rice bowls, as well as combining chicken with rice and cheese. The user currently focuses on chicken dishes and recently discussed making a chicken and broccoli bake with Parmesan.",
+  "note": "Backed up before clearing. This memory conflicted with kosher=true (meat+dairy) and was overriding the dietary rules in Micheli's prompt."
+}

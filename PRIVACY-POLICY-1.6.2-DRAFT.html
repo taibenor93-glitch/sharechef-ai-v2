@@ -1,0 +1,50 @@
+<!-- ============================================================
+     DRAFT — ready to publish, not yet published.
+     Replaces public/privacy.html for 1.6.2 (ShareChef Plus).
+     This is the URL the paywall, the app footer, and App Store Connect all
+     point at, so App Review reads THIS page.
+
+     Changes vs the live policy (public/privacy.html, dated July 5 2026):
+       1. NEW "Subscriptions and payments" section. The live policy does not
+          mention paid plans at all, which is a gap now that the app sells a
+          $9.99/month auto-renewing subscription.
+       2. RevenueCat and Apple added to third-party services.
+       3. "Data deletion" rewritten for the in-app deletion that is now live
+          (Preferences > Delete account); email kept as a fallback.
+       4. Date bump.
+
+     Deliberately NOT included: the "Usage analytics" section from
+     PRIVACY-POLICY-1.6-DRAFT.html. VITE_EVENTS_ENABLED is not set in the
+     shipped bundle, so no usage events are collected today and disclosing
+     collection that is not happening would misstate the App Privacy answers.
+     Publish that section at the same time the analytics flag is switched on.
+
+     To publish: replace public/privacy.html with everything below this
+     comment, set the date, and deploy.
+     ============================================================ -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ShareChef Privacy Policy</title>
+<style>body{font-family:-apple-system,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222}h1,h2{color:#111}</style></head>
+<body>
+<h1>ShareChef Privacy Policy</h1>
+<p>Last updated: [SET AT PUBLISH]</p>
+<h2>What we collect</h2>
+<p>When you create an account, we collect your email address and login credentials, stored securely with Supabase. Recipes you save and content you share are stored with your account. If you use voice features, your speech is transmitted to OpenAI to generate Micheli's responses; ShareChef does not permanently store your voice recordings.</p>
+<h2>How we use your data</h2>
+<p>Your data is used only to provide ShareChef's features: generating recipes, powering voice conversations, saving your collection, and community sharing. We do not sell your data or use it for advertising.</p>
+<h2>Subscriptions and payments</h2>
+<p>ShareChef Plus is an auto-renewing subscription sold through Apple. Payment is charged to your Apple ID, and the subscription renews each month until you cancel it at least 24 hours before the end of the current period. You can view, change, or cancel it at any time in your App Store account settings.</p>
+<p>ShareChef never sees or stores your payment details. Apple handles the transaction and does not share your card or billing information with us. We use RevenueCat to confirm whether a subscription is active; for that purpose RevenueCat receives your ShareChef account ID and the purchase record Apple issues, and returns only whether your subscription is currently valid. All we store on our side is which plan your account is on, so the app knows whether to apply the free-plan limit. Cancelling your subscription is done with Apple; deleting your ShareChef account does not cancel it.</p>
+<h2>Third-party services</h2>
+<p>ShareChef uses Supabase (accounts and data storage), OpenAI (recipe generation and voice processing), Railway (application hosting), and Apple together with RevenueCat (subscription purchases and their validation). Each processes data only as needed to operate the app.</p>
+<h2>Microphone access</h2>
+<p>ShareChef requests microphone access solely so you can talk to Micheli. Audio is processed in real time and is not used for any other purpose.</p>
+<h2>Data deletion</h2>
+<p>You can permanently delete your account and all associated data at any time inside the app: open Preferences, choose "Delete account", and confirm with your password. Deletion is immediate and irreversible — it removes your account, saved recipes, Micheli's memory of you, cooking sessions, and shares. Deleting your account does not cancel an active ShareChef Plus subscription; cancel that separately in your App Store account settings. If you cannot access the app, contact us at taibenor93@gmail.com and we will process your request within 30 days.</p>
+<h2>Children</h2>
+<p>ShareChef is not directed at children under 13 and we do not knowingly collect their data.</p>
+<h2>Changes</h2>
+<p>We may update this policy; changes will be posted on this page.</p>
+<p>Contact: taibenor93@gmail.com</p>
+</body></html>

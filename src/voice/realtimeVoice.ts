@@ -114,7 +114,7 @@ export class RealtimeVoice {
     if (!this.playbackCtx) {
       this.playbackCtx = new (
         (window as any).AudioContext || (window as any).webkitAudioContext
-      )({ sampleRate: 24000 })
+      )()
     }
     if (this.playbackCtx!.state === 'suspended') await this.playbackCtx!.resume()
   }

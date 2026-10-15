@@ -11,3 +11,4 @@ tests/.compiled-events/
 tests/.compiled-local/
 tsconfig.tsbuildinfo
 tests/.compiled-voice/
+tests/.compiled-deeplink/
