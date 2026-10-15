@@ -5,7 +5,7 @@ import { useAuth, setGuest } from '../hooks/useAuth'
 import { supabase } from '../lib/supabaseClient'
 import { RealtimeVoice } from '../voice/realtimeVoice'
 import type { VoiceStatus } from '../voice/realtimeVoice'
-import { generateRecipe } from '../lib/recipeApi'
+import { generateRecipe, recipeFromCook } from '../lib/recipeApi'
 import type { GeneratedRecipe } from '../lib/recipeApi'
 import { getStarProgress } from '../lib/stars'
 import { LANGUAGES, initialLanguage, saveLanguage, savedLanguage } from '../lib/language'
@@ -149,6 +149,7 @@ export function HomePage() {
     if (!v) return
     setVoiceError(null)
     if (status === 'idle') {
+      setCookWrapUp('idle')
       startingRef.current = true
       setStatus('connecting')
       await v.unlockAudio()
@@ -163,8 +164,10 @@ export function HomePage() {
     } else {
       startingRef.current = false
       v.disconnect()
+      const said = lines
       setLines([])
       setServerAuth(null)
+      void finishVoiceCook(said)
     }
   }
 
@@ -186,6 +189,8 @@ export function HomePage() {
     setSaveState('idle')
     setSavedId(null)
     setPhotoStep('ask')
+    setRecipeSource('typed')
+    setCookWrapUp('idle')
     try {
       const { data } = await supabase.auth.getSession()
       const r = await generateRecipe(ingredients, language, data.session?.access_token ?? null)
@@ -200,6 +205,11 @@ export function HomePage() {
   const onSave = async () => {
     if (!recipe) return
     if (!userId) { setGuest(false); nav('/login'); return } // guests sign in to save (leave guest mode or /login bounces back)
+    await saveRecipe(recipe, userId)
+  }
+
+  // Shared by the Save button (typed recipes) and the end of a voice cook.
+  const saveRecipe = async (recipe: GeneratedRecipe, userId: string) => {
     setSaveState('saving')
     const { data: inserted, error } = await supabase.from('recipes').insert({
       user_id: userId,
@@ -223,6 +233,38 @@ export function HomePage() {
     setSavedId(inserted?.id ?? null)
     setSaveState('saved')
     loadCount()
+  }
+
+  // ── voice cook → recipe ──
+  // Ending a voice cook writes it up as a recipe and saves it, hands-free, so
+  // the photo prompt and sharing work exactly as for a typed recipe.
+  const recipeCardRef = useRef<HTMLDivElement | null>(null)
+  const lastCookRef = useRef<Line[]>([])
+  const [recipeSource, setRecipeSource] = useState<'typed' | 'voice'>('typed')
+  const [cookWrapUp, setCookWrapUp] = useState<'idle' | 'working' | 'none' | 'error'>('idle')
+
+  const finishVoiceCook = async (said: Line[]) => {
+    // Nothing worth writing up: Micheli never heard the user, or never answered.
+    if (!said.some((l) => l.role === 'user') || !said.some((l) => l.role === 'chef')) return
+    lastCookRef.current = said
+    const { data } = await supabase.auth.getSession()
+    const token = data.session?.access_token
+    if (!token || !userId) return // voice cooks are signed-in only
+    setCookWrapUp('working')
+    try {
+      const r = await recipeFromCook(said, language, token)
+      if (!r) { setCookWrapUp('none'); return }
+      setCookWrapUp('idle')
+      setGenError(null)
+      setRecipe(r)
+      setRecipeSource('voice')
+      setSavedId(null)
+      setPhotoStep('ask')
+      await saveRecipe(r, userId)
+      recipeCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    } catch {
+      setCookWrapUp('error')
+    }
   }
 
   return (
@@ -315,6 +357,16 @@ export function HomePage() {
             <button type="button" className="link-btn" onClick={toggleVoice}>End session</button>
           )}
           {voiceError && <div className="alert alert-error" style={{ marginTop: 6 }}>{voiceError}</div>}
+          {cookWrapUp === 'working' && <div className="muted" style={{ marginTop: 6 }}>Saving your cook as a recipe…</div>}
+          {cookWrapUp === 'none' && <div className="muted" style={{ marginTop: 6 }}>No dish to save from that chat.</div>}
+          {cookWrapUp === 'error' && (
+            <div className="alert alert-error" style={{ marginTop: 6 }}>
+              Couldn't save this cook as a recipe.{' '}
+              <button type="button" className="link-btn" onClick={() => { void finishVoiceCook(lastCookRef.current) }}>
+                Try again
+              </button>
+            </div>
+          )}
           {limitInfo && (
             <UpgradeSheet
               used={limitInfo.used}
@@ -390,8 +442,9 @@ export function HomePage() {
 
       {/* Recipe result */}
       {recipe && (
-        <div className="card recipe-card stack">
+        <div className="card recipe-card stack" ref={recipeCardRef}>
           <div>
+            {recipeSource === 'voice' && <div className="eyebrow">From your cook with Micheli</div>}
             <h3 className="recipe-title">{recipe.title}</h3>
             {recipe.description && <p className="recipe-desc">{recipe.description}</p>}
             <div className="recipe-meta">

@@ -13,6 +13,20 @@ export interface GeneratedRecipe {
   nutrition: string
 }
 
+function toGeneratedRecipe(data: Partial<GeneratedRecipe>): GeneratedRecipe {
+  return {
+    title: data.title ?? 'Untitled dish',
+    description: data.description ?? '',
+    ingredients: Array.isArray(data.ingredients) ? data.ingredients : [],
+    steps: Array.isArray(data.steps) ? data.steps : [],
+    cook_time_minutes: data.cook_time_minutes ?? null,
+    servings: data.servings ?? null,
+    tags: Array.isArray(data.tags) ? data.tags : [],
+    tip: data.tip ?? '',
+    nutrition: data.nutrition ?? '',
+  }
+}
+
 export async function generateRecipe(
   ingredients: string[],
   language = 'English',
@@ -33,21 +47,30 @@ export async function generateRecipe(
     throw new Error(`Recipe service error (${res.status}). ${msg}`.trim())
   }
   const data = (await res.json()) as Partial<GeneratedRecipe>
-  const result: GeneratedRecipe = {
-    title: data.title ?? 'Untitled dish',
-    description: data.description ?? '',
-    ingredients: Array.isArray(data.ingredients) ? data.ingredients : [],
-    steps: Array.isArray(data.steps) ? data.steps : [],
-    cook_time_minutes: data.cook_time_minutes ?? null,
-    servings: data.servings ?? null,
-    tags: Array.isArray(data.tags) ? data.tags : [],
-    tip: data.tip ?? '',
-    nutrition: data.nutrition ?? '',
-  }
+  const result = toGeneratedRecipe(data)
   // Phase 1 events: a dish counts as proposed only after the response parsed
   // AND carries real dish data — a failed parse or empty dish never emits.
   if (typeof data.title === 'string' && data.title.trim() && result.steps.length > 0) {
     track('dish_proposed', { ingredient_count: Math.min(99, ingredients.length) }, accessToken)
   }
   return result
+}
+
+export type CookLine = { role: 'user' | 'chef'; text: string }
+
+// A finished voice cook, written up as a recipe by the server. Null when the
+// conversation never settled on a dish (just chatting, or ended early).
+export async function recipeFromCook(
+  lines: CookLine[],
+  language: string,
+  accessToken: string
+): Promise<GeneratedRecipe | null> {
+  const res = await fetch(`${API_BASE}/api/recipe/from-cook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ lines, language }),
+  })
+  if (!res.ok) throw new Error(`Recipe service error (${res.status}).`)
+  const data = (await res.json()) as { recipe: Partial<GeneratedRecipe> | null }
+  return data.recipe ? toGeneratedRecipe(data.recipe) : null
 }

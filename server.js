@@ -758,6 +758,25 @@ async function summarizeAndSaveMemory(token, userId, oldSummary, lines) {
 }
 
 // ── Recipe generation ────────────────────────────────────────────────────────
+// Same output shape for typed and voice recipes (maps to the `recipes` table).
+function normalizeRecipe(raw) {
+  const toInt = (v) => {
+    const n = parseInt(v, 10)
+    return Number.isFinite(n) ? n : null
+  }
+  return {
+    title: String(raw.title || 'A simple dish'),
+    description: String(raw.description || ''),
+    ingredients: Array.isArray(raw.ingredients) ? raw.ingredients.map(String) : [],
+    steps: Array.isArray(raw.steps) ? raw.steps.map(String) : [],
+    cook_time_minutes: toInt(raw.cook_time_minutes),
+    servings: toInt(raw.servings),
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String).slice(0, 5) : [],
+    tip: String(raw.tip || ''),
+    nutrition: String(raw.nutrition || ''),
+  }
+}
+
 app.post('/api/recipe/generate', async (req, res) => {
   const { ingredients, language } = req.body || {}
   if (!Array.isArray(ingredients) || ingredients.length === 0) {
@@ -802,25 +821,100 @@ Return STRICT JSON in exactly this shape:
       ],
     })
 
-    const raw = JSON.parse(completion.choices[0].message.content || '{}')
-    const toInt = (v) => {
-      const n = parseInt(v, 10)
-      return Number.isFinite(n) ? n : null
-    }
-    res.json({
-      title: String(raw.title || 'A simple dish'),
-      description: String(raw.description || ''),
-      ingredients: Array.isArray(raw.ingredients) ? raw.ingredients.map(String) : [],
-      steps: Array.isArray(raw.steps) ? raw.steps.map(String) : [],
-      cook_time_minutes: toInt(raw.cook_time_minutes),
-      servings: toInt(raw.servings),
-      tags: Array.isArray(raw.tags) ? raw.tags.map(String).slice(0, 5) : [],
-      tip: String(raw.tip || ''),
-      nutrition: String(raw.nutrition || ''),
-    })
+    res.json(normalizeRecipe(JSON.parse(completion.choices[0].message.content || '{}')))
   } catch (err) {
     console.error('[recipe] error:', err.message)
     res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+// ── Recipe from a voice cook ─────────────────────────────────────────────────
+// When the user ends a voice cook, the app sends the conversation it heard and
+// gets back the dish as a recipe, ready to save like a typed one. The app's
+// copy is used, not the server's: the server's transcript lives on one socket
+// and starts over on every reconnect, while the app keeps the whole cook.
+const COOK_MAX_LINES = 300
+const COOK_MAX_LINE_CHARS = 2000
+const COOK_MAX_TOTAL_CHARS = 60_000
+
+// Returns { lines } or { error }. Only well-formed, bounded input reaches OpenAI.
+function validateCookLines(input) {
+  if (!Array.isArray(input) || input.length === 0) return { error: 'lines array required' }
+  if (input.length > COOK_MAX_LINES) return { error: 'too many lines' }
+  const lines = []
+  let total = 0
+  for (const l of input) {
+    if (!l || (l.role !== 'user' && l.role !== 'chef') || typeof l.text !== 'string') return { error: 'bad line' }
+    const text = l.text.trim().slice(0, COOK_MAX_LINE_CHARS)
+    if (!text) continue
+    total += text.length
+    if (total > COOK_MAX_TOTAL_CHARS) return { error: 'conversation too long' }
+    lines.push({ role: l.role, text })
+  }
+  if (!lines.some((l) => l.role === 'user') || !lines.some((l) => l.role === 'chef')) {
+    return { error: 'conversation needs both sides' }
+  }
+  return { lines }
+}
+
+const cookRecipeBuckets = new Map() // userId → { hourStart, count } (per-process, best-effort)
+function cookRecipeRateLimited(userId) {
+  const now = Date.now()
+  let b = cookRecipeBuckets.get(userId)
+  if (!b || now - b.hourStart > 3600_000) { b = { hourStart: now, count: 0 }; cookRecipeBuckets.set(userId, b) }
+  b.count++
+  if (cookRecipeBuckets.size > 5000) cookRecipeBuckets.clear() // memory ceiling
+  return b.count > 20
+}
+
+let cookUserVerifier = verifyUser // seam for offline tests
+
+app.post('/api/recipe/from-cook', async (req, res) => {
+  // Voice cooks are signed-in only, so this is too: no anonymous OpenAI spend.
+  const authHeader = req.headers.authorization || ''
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+  const reqUser = token ? await cookUserVerifier(token) : null
+  if (!reqUser) return res.status(401).json({ error: 'sign in required' })
+  const { lines, error } = validateCookLines(req.body?.lines)
+  if (error) return res.status(400).json({ error })
+  if (cookRecipeRateLimited(reqUser.id)) return res.status(429).json({ error: 'rate limited' })
+  if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'OPENAI_API_KEY not configured' })
+  const language = typeof req.body?.language === 'string' && req.body.language.trim()
+    ? req.body.language.trim().slice(0, 40) : 'English'
+
+  try {
+    const convo = lines.map((l) => `${l.role === 'user' ? 'User' : 'Micheli'}: ${l.text}`).join('\n')
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `You turn a hands-free cooking conversation between a user and Micheli, their AI chef, into the recipe they cooked together. The conversation comes from speech recognition, so expect garbled words. Write up ONLY the dish the conversation actually decided on and cooked or walked through. Use the ingredients and steps from the conversation in the order Micheli gave them. Never add a main ingredient that was not mentioned. Give a rough quantity for each ingredient, using the one said in the conversation when there was one. If the conversation never settled on one specific dish with steps, return {"dish": null} and nothing else. Write everything in the language the conversation was held in; if unclear, use ${language}.
+Return STRICT JSON in exactly this shape:
+{
+  "dish": true,
+  "title": "string",
+  "description": "one warm inviting sentence",
+  "ingredients": ["item with a rough quantity"],
+  "steps": ["full sentence step, no numbering"],
+  "cook_time_minutes": 25,
+  "servings": 2,
+  "tags": ["short", "lowercase", "tags"],
+  "tip": "one concise helpful sentence from the cook, or empty",
+  "nutrition": "per-serving estimate, e.g. ~520 kcal · 24g protein · 18g fat · 61g carbs"
+}`,
+        },
+        { role: 'user', content: convo },
+      ],
+    })
+    const raw = JSON.parse(completion.choices[0].message.content || '{}')
+    const recipe = raw && raw.dish ? normalizeRecipe(raw) : null
+    // A dish without steps is not a recipe worth saving.
+    res.json({ recipe: recipe && recipe.steps.length > 0 && recipe.ingredients.length > 0 ? recipe : null })
+  } catch (err) {
+    console.error('[recipe/from-cook] error:', err.message)
+    res.status(err.status || 500).json({ error: 'could not write up this cook' })
   }
 })
 
@@ -1361,6 +1455,9 @@ if (!process.env.SC_TEST_NO_LISTEN) {
 // Test-only surface (harmless in production; used by tests/ with SC_TEST_NO_LISTEN=1).
 export const __test = {
   validateEvent,
+  validateCookLines,
+  normalizeRecipe,
+  setCookUserVerifier(fn) { cookUserVerifier = fn },
   EVENT_NAMES_CLIENT,
   EVENT_NAMES_SERVER,
   emitServerEvent,
