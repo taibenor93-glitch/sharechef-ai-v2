@@ -9,5 +9,6 @@ export type Recipe = {
   servings: number | null
   tags: string[] | null
   photo_path: string | null
+  nutrition: string | null
   created_at: string
 }

@@ -77,6 +77,7 @@ export function SavedDetailPage() {
         'Steps:',
         ...(Array.isArray(recipe.steps) ? recipe.steps.map((s, i) => `${i + 1}. ${s}`) : []),
         '',
+        ...(recipe.nutrition ? [`Nutrition (per serving, estimate): ${recipe.nutrition}`, ''] : []),
         `Made with Micheli, my AI chef on ShareChef AI 👨‍🍳 ${APP_LINK}`,
       ].filter((line) => line !== null).join('\n')
     : `Cook with Micheli on ShareChef AI 🍳 ${APP_LINK}`
@@ -205,6 +206,8 @@ export function SavedDetailPage() {
               <ol>{(recipe.steps ?? []).map((s, i) => <li key={i}>{s}</li>)}</ol>
             </div>
           </div>
+
+          {recipe.nutrition && <div className="muted">🥗 Nutrition (per serving, estimate): {recipe.nutrition}</div>}
 
           <div className="share-block stack" style={{ borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 12 }}>
             <div className="section-title">Share this creation</div>

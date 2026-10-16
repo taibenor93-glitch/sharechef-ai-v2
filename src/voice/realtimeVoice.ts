@@ -6,6 +6,7 @@ import { WS_BASE } from '../lib/apiBase'
 import { getAnonId, getSessionId, initIdentity } from '../lib/session'
 import { APP_VERSION, voiceActivity } from '../lib/events'
 import { tapeMic, tapeVoice } from '../lib/soundTape'
+import { StreamResampler } from './streamResampler'
 
 // Phase 1 events: identity + app version ride the auth frame ONLY when
 // analytics is enabled, so a disabled build sends no persistent identifier.
@@ -32,6 +33,11 @@ export class RealtimeVoice {
   private processorNode: AudioWorkletNode | null = null
   private isPlayingAudio = false
   private nextPlayTime = 0
+  // Playback runs at the device's native rate (so recordings stay clean). Her
+  // 24 kHz voice is converted here as one stream and laid down frame-exact,
+  // so there are no seams between chunks to click. See ./streamResampler.
+  private resampler: StreamResampler | null = null
+  private nextPlayFrame = 0
   private isListening = false
   private pendingTranscript = ''
   private cb: VoiceCallbacks
@@ -226,6 +232,8 @@ export class RealtimeVoice {
     this.isPlayingAudio = false
     this.hasStartedConversation = false
     this.nextPlayTime = 0
+    this.nextPlayFrame = 0
+    this.resampler = null
     this.pendingTranscript = ''
     // Tell the server this is a deliberate goodbye, not an interruption —
     // a deliberate end closes the cook instead of resuming it next time.
@@ -424,10 +432,15 @@ export class RealtimeVoice {
   }
 
   private queueAudio(base64: string): void {
-    if (!this.playbackCtx || !base64) return
+    const ctx = this.playbackCtx
+    if (!ctx || !base64) return
+    const rate = ctx.sampleRate
+    if (!this.resampler) this.resampler = new StreamResampler(24000, rate)
     if (!this.isPlayingAudio) {
       this.isPlayingAudio = true
-      this.nextPlayTime = this.playbackCtx.currentTime + 0.15
+      this.resampler.reset()
+      this.nextPlayFrame = Math.round((ctx.currentTime + 0.15) * rate)
+      this.nextPlayTime = this.nextPlayFrame / rate
       // Mute the mic while Micheli speaks — avoids echo with server VAD. Keep
       // the MediaStream itself alive: releasing and re-acquiring it on every
       // turn churns the iOS audio session, which is what wrecked the sound.
@@ -441,15 +454,21 @@ export class RealtimeVoice {
     const samples = new Float32Array(bytes.length / 2)
     const view = new DataView(bytes.buffer)
     for (let i = 0; i < samples.length; i++) samples[i] = view.getInt16(i * 2, true) / 32768
-    const buffer = this.playbackCtx.createBuffer(1, samples.length, 24000)
-    buffer.getChannelData(0).set(samples)
-    const node = this.playbackCtx.createBufferSource()
+    const out = this.resampler.push(samples)
+    if (out.length === 0) return
+    const buffer = ctx.createBuffer(1, out.length, rate)
+    buffer.getChannelData(0).set(out)
+    const node = ctx.createBufferSource()
     node.buffer = buffer
-    node.connect(this.playbackCtx.destination)
-    const startAt = Math.max(this.nextPlayTime, this.playbackCtx.currentTime + 0.05)
+    node.connect(ctx.destination)
+    // Whole frames only: each chunk starts on the exact frame the last one
+    // ended, so they butt together with no gap and no overlap.
+    const startFrame = Math.max(this.nextPlayFrame, Math.ceil((ctx.currentTime + 0.05) * rate))
+    const startAt = startFrame / rate
     node.start(startAt)
-    tapeVoice(samples, performance.now() + (startAt - this.playbackCtx.currentTime) * 1000)
-    this.nextPlayTime = startAt + buffer.duration
+    tapeVoice(samples, performance.now() + (startAt - ctx.currentTime) * 1000)
+    this.nextPlayFrame = startFrame + out.length
+    this.nextPlayTime = this.nextPlayFrame / rate
   }
 
   private wsSend(msg: object): void {

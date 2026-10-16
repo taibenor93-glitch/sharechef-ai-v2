@@ -212,7 +212,7 @@ export function HomePage() {
   // Shared by the Save button (typed recipes) and the end of a voice cook.
   const saveRecipe = async (recipe: GeneratedRecipe, userId: string) => {
     setSaveState('saving')
-    const { data: inserted, error } = await supabase.from('recipes').insert({
+    const row = {
       user_id: userId,
       title: recipe.title,
       description: recipe.description || null,
@@ -221,7 +221,15 @@ export function HomePage() {
       cook_time_minutes: recipe.cook_time_minutes,
       servings: recipe.servings,
       tags: recipe.tags,
-    }).select('id').single()
+      nutrition: recipe.nutrition || null,
+    }
+    let { data: inserted, error } = await supabase.from('recipes').insert(row).select('id').single()
+    // Database not migrated yet (recipes.nutrition missing): save the recipe
+    // without it rather than lose the save.
+    if (error?.code === 'PGRST204' && error.message.includes('nutrition')) {
+      const { nutrition: _skip, ...withoutNutrition } = row
+      ;({ data: inserted, error } = await supabase.from('recipes').insert(withoutNutrition).select('id').single())
+    }
     if (error) {
       setGenError(error.message)
       setSaveState('idle')
