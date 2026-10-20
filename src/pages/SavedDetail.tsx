@@ -6,6 +6,7 @@ import { recordShare } from '../lib/shares'
 import type { ShareChannel } from '../lib/shares'
 import { dishPhotoFile, dishPhotoUrl, removeDishPhoto } from '../lib/dishPhoto'
 import { DishPhotoPrompt } from '../components/DishPhotoPrompt'
+import { recipeShareText } from '../lib/recipeShareText'
 
 export function SavedDetailPage() {
   const { id } = useParams()
@@ -67,19 +68,7 @@ export function SavedDetailPage() {
     : 'Cook with Micheli on ShareChef AI 🍳'
   // Share the actual recipe, not just a link — sharing creations is what ShareChef means.
   const fullRecipeText = recipe
-    ? [
-        `${recipe.title} 🍳`,
-        recipe.description || '',
-        '',
-        'Ingredients:',
-        ...(Array.isArray(recipe.ingredients) ? recipe.ingredients.map((i) => `• ${i}`) : []),
-        '',
-        'Steps:',
-        ...(Array.isArray(recipe.steps) ? recipe.steps.map((s, i) => `${i + 1}. ${s}`) : []),
-        '',
-        ...(recipe.nutrition ? [`Nutrition (per serving, estimate): ${recipe.nutrition}`, ''] : []),
-        `Made with Micheli, my AI chef on ShareChef AI 👨‍🍳 ${APP_LINK}`,
-      ].filter((line) => line !== null).join('\n')
+    ? recipeShareText(recipe)
     : `Cook with Micheli on ShareChef AI 🍳 ${APP_LINK}`
   const enc = encodeURIComponent
   const waHref = `https://wa.me/?text=${enc(fullRecipeText)}`
