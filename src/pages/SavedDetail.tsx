@@ -7,7 +7,8 @@ import type { ShareChannel } from '../lib/shares'
 import { dishPhotoFile, dishPhotoUrl, removeDishPhoto } from '../lib/dishPhoto'
 import { DishPhotoPrompt } from '../components/DishPhotoPrompt'
 import { APP_STORE_LINK, recipeShareText } from '../lib/recipeShareText'
-import { renderRecipeShareCard } from '../lib/recipeShareCard'
+import { renderLinkPreview, renderRecipeShareCard } from '../lib/recipeShareCard'
+import { newShareId, publishShare, removeRecipeShareImages, removeShare, shareLinksReady, shareUrl } from '../lib/shareLink'
 import { MAX_CLIP_SECONDS, canMakeShareVideo, makeRecipeShareVideo } from '../lib/recipeShareVideo'
 import type { VideoProgress } from '../lib/recipeShareVideo'
 
@@ -65,6 +66,19 @@ export function SavedDetailPage() {
     return () => { live = false }
   }, [photoFile, recipe])
 
+  // Link sharing (preview card + tappable link) once the server and database
+  // support it; until then the card image is shared instead.
+  const [linkReady, setLinkReady] = useState(false)
+  const [linkPreview, setLinkPreview] = useState<Blob | null>(null)
+  useEffect(() => { void shareLinksReady().then(setLinkReady) }, [])
+  useEffect(() => {
+    setLinkPreview(null)
+    if (!recipe || (recipe.photo_path && !photoFile)) return
+    let live = true
+    renderLinkPreview(recipe, photoFile).then((b) => { if (live) setLinkPreview(b) })
+    return () => { live = false }
+  }, [photoFile, recipe])
+
   // Only when the device can put this file in the share sheet.
   const canShareFile = (file: File | null): file is File =>
     !!file && typeof navigator !== 'undefined' && !!navigator.canShare && navigator.canShare({ files: [file] })
@@ -72,6 +86,7 @@ export function SavedDetailPage() {
   // ── video share ──
   const [shareMode, setShareMode] = useState<'photo' | 'video'>('photo')
   const videoInputRef = useRef<HTMLInputElement | null>(null)
+  const recordInputRef = useRef<HTMLInputElement | null>(null)
   const [clip, setClip] = useState<File | null>(null)
   const [shareVideo, setShareVideo] = useState<File | null>(null)
   const [videoProgress, setVideoProgress] = useState<VideoProgress | null>(null)
@@ -108,6 +123,7 @@ export function SavedDetailPage() {
     if (!id) return
     setBusy(true)
     setError(null)
+    if (recipe) await removeRecipeShareImages(id, recipe.user_id).catch(() => {})
     const { error } = await supabase.from('recipes').delete().eq('id', id)
     setBusy(false)
     if (error) return setError(error.message)
@@ -128,6 +144,35 @@ export function SavedDetailPage() {
   const xHref = `https://twitter.com/intent/tweet?text=${enc(shareText)}&url=${enc(APP_LINK)}`
   const fbHref = `https://www.facebook.com/sharer/sharer.php?u=${enc(APP_LINK)}`
   const liHref = `https://www.linkedin.com/sharing/share-offsite/?url=${enc(APP_LINK)}`
+
+  // A ShareChef link: recipients see a preview card (photo, title, ShareChef
+  // logo) and tap it for the full recipe and the App Store button. The link
+  // is published as the sheet opens (the sheet must open straight from the
+  // tap) and removed again if the user closes the sheet without sharing.
+  const shareLink = async (channel: ShareChannel, label?: string, file?: File) => {
+    if (!recipe) return
+    setShareMsg(null)
+    const sid = newShareId()
+    const url = shareUrl(sid)
+    const published = publishShare(sid, recipe.user_id, recipe.id, recipe, linkPreview)
+    const caption = `${recipe.title} 🍳 Full recipe, cooked hands-free with Micheli on ShareChef AI: ${url}`
+    navigator.clipboard?.writeText(caption).catch(() => {}) // not awaited: keep the tap fresh for share()
+    try {
+      // With a video, the link rides in the text (Threads keeps only the
+      // video, so the caption on the clipboard carries the link there).
+      await navigator.share(file ? { files: [file], title: recipe.title, text: caption } : { title: recipe.title, text: caption, url })
+    } catch {
+      if (await published) await removeShare(sid, recipe.user_id).catch(() => {})
+      return // user dismissed the share sheet
+    }
+    if (!(await published)) {
+      setShareMsg('Shared, but the recipe link could not be saved. It opens the App Store instead.')
+      return
+    }
+    const earned = await recordShare(channel, id ?? null)
+    const pick = label ? `Pick ${label} in the share sheet. ` : ''
+    setShareMsg(`${earned ? '⭐ +1 Micheli Star! ' : ''}${pick}Link copied too, paste it as your caption if it's missing.`)
+  }
 
   // Photo + full recipe through the share sheet. Web links (wa.me, X, Facebook)
   // can't carry a photo, so with a photo every button goes this way. Instagram
@@ -153,7 +198,14 @@ export function SavedDetailPage() {
 
   // Channel buttons: open the share sheet with the card; the old web link
   // only when this device cannot share files.
-  const onChannel = (channel: ShareChannel, label: string, fallback: () => void) => (e: React.MouseEvent) => {
+  const onChannel = (channel: ShareChannel, label: string, fallback: () => void, imageOnly = false) => (e: React.MouseEvent) => {
+    // Apps that show link previews get the ShareChef link; Instagram and
+    // TikTok only take images, so they get the card.
+    if (linkReady && !imageOnly && typeof navigator.share === 'function') {
+      e.preventDefault()
+      void shareLink(channel, label)
+      return
+    }
     if (canShareFile(shareCard)) {
       e.preventDefault()
       void sharePhoto(channel, shareCard, label)
@@ -187,6 +239,7 @@ export function SavedDetailPage() {
 
   const onShare = async () => {
     setShareMsg(null)
+    if (linkReady && typeof navigator.share === 'function') return shareLink('native')
     if (canShareFile(shareCard)) return sharePhoto('native', shareCard)
     try {
       if (typeof navigator !== 'undefined' && navigator.share) {
@@ -264,16 +317,20 @@ export function SavedDetailPage() {
             {shareMode === 'video' ? (
               <div className="stack" style={{ gap: 8 }}>
                 <div className="muted">
-                  Pick a video of your cook (up to {MAX_CLIP_SECONDS} seconds is used). ShareChef adds the full recipe and an ending with the ShareChef logo, App Store link and QR code.
+                  Film your cook or pick a clip (up to {MAX_CLIP_SECONDS} seconds is used). ShareChef adds the full recipe and an ending with the ShareChef logo, App Store link and QR code.
                 </div>
                 {!videoSupported ? (
                   <div className="alert alert-error">This phone can't make share videos yet. Share a photo instead.</div>
                 ) : (
                   <>
                     <input ref={videoInputRef} type="file" accept="video/*" hidden onChange={onPickClip} />
+                    <input ref={recordInputRef} type="file" accept="video/*" capture="environment" hidden onChange={onPickClip} />
                     <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                      <button type="button" className="btn btn-ghost" disabled={!!videoProgress} onClick={() => recordInputRef.current?.click()}>
+                        🎥 Record a clip
+                      </button>
                       <button type="button" className="btn btn-ghost" disabled={!!videoProgress} onClick={() => videoInputRef.current?.click()}>
-                        {clip ? 'Choose another video' : 'Choose a video'}
+                        {clip ? 'Choose another video' : 'Choose from library'}
                       </button>
                       {clip && !shareVideo && (
                         <button type="button" className="btn btn-primary" disabled={!!videoProgress} onClick={() => { void onMakeVideo() }}>
@@ -281,7 +338,7 @@ export function SavedDetailPage() {
                         </button>
                       )}
                       {shareVideo && (
-                        <button type="button" className="btn btn-primary" onClick={() => { void sharePhoto('native', shareVideo) }}>
+                        <button type="button" className="btn btn-primary" onClick={() => { void (linkReady ? shareLink('native', undefined, shareVideo) : sharePhoto('native', shareVideo)) }}>
                           📤 Share video
                         </button>
                       )}
@@ -304,12 +361,13 @@ export function SavedDetailPage() {
             </div>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
               <button type="button" className="btn btn-primary" onClick={onShare}>📤 Share</button>
+              <button type="button" className="btn btn-ghost" onClick={onChannel('native', 'Threads', () => { void onShare() })}>Threads</button>
               <a className="btn btn-ghost" href={waHref} target="_blank" rel="noopener noreferrer" onClick={onChannel('whatsapp', 'WhatsApp', () => trackShare('whatsapp'))}>WhatsApp</a>
               <a className="btn btn-ghost" href={xHref} target="_blank" rel="noopener noreferrer" onClick={onChannel('x', 'X', () => trackShare('x'))}>X</a>
               <a className="btn btn-ghost" href={fbHref} target="_blank" rel="noopener noreferrer" onClick={onChannel('facebook', 'Facebook', () => trackShare('facebook'))}>Facebook</a>
               <a className="btn btn-ghost" href={liHref} target="_blank" rel="noopener noreferrer" onClick={onChannel('linkedin', 'LinkedIn', () => trackShare('linkedin'))}>LinkedIn</a>
-              <button type="button" className="btn btn-ghost" onClick={onChannel('instagram', 'Instagram', () => copyAndOpen('instagram', 'https://www.instagram.com/'))}>Instagram</button>
-              <button type="button" className="btn btn-ghost" onClick={onChannel('tiktok', 'TikTok', () => copyAndOpen('tiktok', 'https://www.tiktok.com/'))}>TikTok</button>
+              <button type="button" className="btn btn-ghost" onClick={onChannel('instagram', 'Instagram', () => copyAndOpen('instagram', 'https://www.instagram.com/'), true)}>Instagram</button>
+              <button type="button" className="btn btn-ghost" onClick={onChannel('tiktok', 'TikTok', () => copyAndOpen('tiktok', 'https://www.tiktok.com/'), true)}>TikTok</button>
               <button type="button" className="btn btn-ghost" onClick={onChannel('youtube', 'YouTube', () => copyAndOpen('youtube', 'https://www.youtube.com/'))}>YouTube</button>
             </div>
             </>

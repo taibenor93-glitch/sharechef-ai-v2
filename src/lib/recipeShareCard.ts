@@ -246,3 +246,55 @@ export async function renderRecipeShareCard(recipe: ShareableRecipe, photo: Blob
     if (photoUrl) URL.revokeObjectURL(photoUrl)
   }
 }
+
+// 1200x630 preview for a shared recipe link: what Threads, Messages and
+// WhatsApp show above the link. The dish photo (or the recipe title on plum)
+// with the ShareChef logo, so it reads as sent from ShareChef.
+export async function renderLinkPreview(recipe: ShareableRecipe, photo: Blob | null): Promise<Blob | null> {
+  const PW = 1200, PH = 630
+  const photoUrl = photo ? URL.createObjectURL(photo) : null
+  try {
+    const [img, brand] = await Promise.all([photoUrl ? loadImage(photoUrl) : Promise.resolve(null), loadBrandAssets()])
+    if (document.fonts?.ready) await document.fonts.ready.catch(() => undefined)
+    const canvas = document.createElement('canvas')
+    canvas.width = PW
+    canvas.height = PH
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.fillStyle = PLUM
+    ctx.fillRect(0, 0, PW, PH)
+    if (img) {
+      const s = Math.max(PW / img.naturalWidth, PH / img.naturalHeight)
+      const w = img.naturalWidth * s, h = img.naturalHeight * s
+      ctx.drawImage(img, (PW - w) / 2, (PH - h) / 2, w, h)
+      const g = ctx.createLinearGradient(0, PH * 0.45, 0, PH)
+      g.addColorStop(0, 'rgba(45,8,38,0)')
+      g.addColorStop(1, 'rgba(45,8,38,0.92)')
+      ctx.fillStyle = g
+      ctx.fillRect(0, 0, PW, PH)
+    }
+    // Title, bottom left (up to two lines).
+    ctx.fillStyle = INK
+    ctx.font = `600 58px ${SERIF}`
+    const lines = wrap(ctx, recipe.title, PW - 120).slice(0, 2)
+    lines.forEach((l, i) => ctx.fillText(l, 60, PH - 64 - (lines.length - 1 - i) * 68))
+    // ShareChef badge, top left.
+    ctx.fillStyle = 'rgba(45,8,38,0.85)'
+    ctx.beginPath()
+    if (typeof ctx.roundRect === 'function') ctx.roundRect(40, 36, 330, 92, 24)
+    else ctx.rect(40, 36, 330, 92)
+    ctx.fill()
+    if (brand.logo) ctx.drawImage(brand.logo, 52, 48, 68, 68)
+    ctx.fillStyle = INK
+    ctx.font = `600 34px ${SERIF}`
+    ctx.fillText('ShareChef AI', 134, 82)
+    ctx.fillStyle = GOLD
+    ctx.font = `20px ${SANS}`
+    ctx.fillText('Hands-free AI chef', 134, 110)
+    return await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/jpeg', 0.88))
+  } catch {
+    return null
+  } finally {
+    if (photoUrl) URL.revokeObjectURL(photoUrl)
+  }
+}

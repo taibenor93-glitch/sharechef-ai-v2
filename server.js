@@ -137,7 +137,14 @@ let deletionUserVerifier = verifyUserForDeletion
 // the retry is safe because analytics disappearing first is the privacy-correct
 // failure mode. Never touches another user's functional data.
 async function removeUserDishPhotos(db, userId) {
-  const bucket = db.storage.from('dish-photos')
+  const photos = await removeUserFolder(db, 'dish-photos', userId)
+  if (!photos.ok) return photos
+  // Public preview images of shared recipe links (rows go with the CASCADE).
+  return removeUserFolder(db, 'share-cards', userId)
+}
+
+async function removeUserFolder(db, bucketId, userId) {
+  const bucket = db.storage.from(bucketId)
   for (;;) {
     const { data, error } = await bucket.list(userId, { limit: 100 })
     // Bucket not created yet (migration pending): there are no photos to remove.
@@ -1439,6 +1446,104 @@ wss.on('connection', (browserWs, req) => {
   browserWs.on('error', (err) => console.error('[WS] Browser error:', err.message))
 })
 
+// ── Shared recipe pages ──────────────────────────────────────────────────────
+// A shared recipe link: https://<server>/r/<id>. The page shows the dish, the
+// full recipe and the App Store button. Its Open Graph tags make Threads,
+// Messages, WhatsApp and the rest show a preview card (photo, title, ShareChef)
+// that opens this page when tapped.
+const APP_STORE_URL = 'https://apps.apple.com/app/sharechef-ai-hands-free-chef/id6787142176'
+const APP_STORE_ID = '6787142176'
+const SHARE_ID_RE = /^[A-Za-z0-9]{16,32}$/
+
+function escapeHtml(v) {
+  return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function shareImageUrl(path) {
+  if (!path || !SUPABASE_URL) return null
+  return `${SUPABASE_URL}/storage/v1/object/public/share-cards/${path.split('/').map(encodeURIComponent).join('/')}`
+}
+
+function renderSharePage(share, pageUrl) {
+  const list = (v) => (Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : [])
+  const ingredients = list(share.ingredients)
+  const steps = list(share.steps)
+  const image = shareImageUrl(share.image_path)
+  const title = `${share.title} · ShareChef AI`
+  const desc = share.description || `${share.title}, cooked hands-free with Micheli on ShareChef AI. Get the full recipe.`
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(desc)}">
+<meta name="apple-itunes-app" content="app-id=${APP_STORE_ID}">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="ShareChef AI">
+<meta property="og:title" content="${escapeHtml(title)}">
+<meta property="og:description" content="${escapeHtml(desc)}">
+<meta property="og:url" content="${escapeHtml(pageUrl)}">
+${image ? `<meta property="og:image" content="${escapeHtml(image)}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">` : ''}
+<meta name="twitter:card" content="${image ? 'summary_large_image' : 'summary'}">
+<meta name="twitter:title" content="${escapeHtml(title)}">
+<meta name="twitter:description" content="${escapeHtml(desc)}">
+${image ? `<meta name="twitter:image" content="${escapeHtml(image)}">` : ''}
+<link rel="icon" href="/sharechef-logo.png">
+<style>
+:root{color-scheme:dark}
+body{margin:0;background:#2D0826;color:#f6efe4;font:17px/1.55 -apple-system,'Helvetica Neue',Arial,sans-serif}
+main{max-width:640px;margin:0 auto;padding:20px 16px 48px}
+.brand{display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit}
+.brand img{width:44px;height:44px;border-radius:11px}
+.brand b{font:600 20px Georgia,serif}
+.hero{width:100%;border-radius:16px;margin:18px 0 6px;display:block}
+h1{font:600 30px/1.2 Georgia,serif;margin:16px 0 6px}
+.desc{color:#d6c5d0;font-style:italic;margin:0 0 4px}
+.by{color:#d8ab5c;font-size:15px;margin:0 0 18px}
+h2{color:#d8ab5c;font:600 20px Georgia,serif;margin:22px 0 8px}
+li{margin-bottom:8px}
+.nut{color:#d6c5d0;font-size:15px}
+.cta{margin:28px 0 0;padding:18px;border:1px solid rgba(216,171,92,.4);border-radius:16px;text-align:center}
+.cta p{margin:0 0 12px}
+.cta a.store img{height:54px}
+</style></head><body><main>
+<a class="brand" href="${APP_STORE_URL}"><img src="/sharechef-logo.png" alt=""><b>ShareChef AI</b></a>
+${image ? `<img class="hero" src="${escapeHtml(image)}" alt="${escapeHtml(share.title)}">` : ''}
+<h1>${escapeHtml(share.title)}</h1>
+${share.description ? `<p class="desc">${escapeHtml(share.description)}</p>` : ''}
+<p class="by">From a cook with Micheli, the hands-free AI chef</p>
+${ingredients.length ? `<h2>Ingredients</h2><ul>${ingredients.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>` : ''}
+${steps.length ? `<h2>Steps</h2><ol>${steps.map((st) => `<li>${escapeHtml(st)}</li>`).join('')}</ol>` : ''}
+${share.nutrition ? `<p class="nut">🥗 Nutrition (per serving, estimate): ${escapeHtml(share.nutrition)}</p>` : ''}
+<div class="cta"><p>Cook this hands-free with Micheli. She talks you through every step.</p>
+<a class="store" href="${APP_STORE_URL}"><img src="/app-store-badge.svg" alt="Download ShareChef AI on the App Store"></a></div>
+</main></body></html>`
+}
+
+let shareDbProvider = () => adminClient() // seam for offline tests
+
+// Lets the app check this server has shared pages before it shares a link.
+app.get('/r/_ready', (_req, res) => res.status(shareDbProvider() ? 204 : 503).end())
+
+app.get('/r/:id', async (req, res) => {
+  const id = req.params.id
+  if (!SHARE_ID_RE.test(id)) return res.redirect(302, APP_STORE_URL)
+  const db = shareDbProvider()
+  if (!db) return res.redirect(302, APP_STORE_URL)
+  try {
+    const { data, error } = await db
+      .from('public_recipe_shares')
+      .select('title, description, ingredients, steps, nutrition, image_path')
+      .eq('id', id)
+      .maybeSingle()
+    // Unknown or removed link: still bring the person to the app.
+    if (error || !data) return res.redirect(302, APP_STORE_URL)
+    res.set('Cache-Control', 'public, max-age=300')
+    res.type('html').send(renderSharePage(data, `https://${req.get('host')}/r/${id}`))
+  } catch {
+    res.redirect(302, APP_STORE_URL)
+  }
+})
+
 // ── Static (Vite build) ──────────────────────────────────────────────────────
 app.use(express.static(join(__dirname, 'dist')))
 app.get('*', (_req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')))
@@ -1456,6 +1561,8 @@ if (!process.env.SC_TEST_NO_LISTEN) {
 export const __test = {
   validateEvent,
   validateCookLines,
+  renderSharePage,
+  setShareDbProvider(fn) { shareDbProvider = fn },
   normalizeRecipe,
   setCookUserVerifier(fn) { cookUserVerifier = fn },
   EVENT_NAMES_CLIENT,
