@@ -9,14 +9,14 @@ import type { ShareableRecipe } from './recipeShareText'
 const W = 1080
 const PAD = 72
 const MAX_H = 9000 // iOS caps canvas area (~16.7M px); 1080 x 9000 stays well inside
-const PLUM = '#2D0826'
+export const PLUM = '#2D0826'
 const INK = '#f6efe4'
 const SOFT = '#d6c5d0'
 const GOLD = '#d8ab5c'
 const SERIF = "Fraunces, Georgia, 'Times New Roman', serif"
 const SANS = "-apple-system, 'Helvetica Neue', Inter, Arial, sans-serif"
 
-function loadImage(src: string): Promise<HTMLImageElement> {
+export function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
     img.onload = () => resolve(img)
@@ -39,25 +39,40 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): st
   return out
 }
 
-type Assets = { photo: HTMLImageElement; logo: HTMLImageElement | null; qr: HTMLImageElement }
+// Logo and QR code, shared by the photo card and the video end card.
+export type BrandAssets = { logo: HTMLImageElement | null; qr: HTMLImageElement }
+type Assets = BrandAssets & { photo: HTMLImageElement | null }
+
+export async function loadBrandAssets(): Promise<BrandAssets> {
+  const [logo, qr] = await Promise.all([
+    loadImage('/sharechef-logo.png').catch(() => null), // the card still works without the logo
+    QRCode.toDataURL(APP_STORE_LINK, { margin: 0, width: 400, color: { dark: PLUM, light: '#ffffff' } }).then(loadImage),
+  ])
+  return { logo, qr }
+}
 
 // Lays the card out top to bottom. With draw=false it only measures, so the
 // canvas can be sized to fit before the real pass. Returns the total height.
-function layout(ctx: CanvasRenderingContext2D, r: ShareableRecipe, a: Assets, k: number, draw: boolean): number {
+// Without a photo it starts with the title; without the footer it ends after
+// the recipe (the video shows the footer on its own end frame instead).
+function layout(ctx: CanvasRenderingContext2D, r: ShareableRecipe, a: Assets, k: number, draw: boolean, footer = true): number {
   const textW = W - PAD * 2
-  let y = 0
+  let y = PAD
 
   // Photo, cropped to at most 4:5 so the recipe stays close to it.
-  const photoH = Math.round(Math.min(W * 1.25, (W * a.photo.naturalHeight) / a.photo.naturalWidth))
-  if (draw) {
-    const srcRatio = a.photo.naturalWidth / a.photo.naturalHeight
-    const dstRatio = W / photoH
-    let sw = a.photo.naturalWidth, sh = a.photo.naturalHeight, sx = 0, sy = 0
-    if (srcRatio > dstRatio) { sw = sh * dstRatio; sx = (a.photo.naturalWidth - sw) / 2 }
-    else { sh = sw / dstRatio; sy = (a.photo.naturalHeight - sh) / 2 }
-    ctx.drawImage(a.photo, sx, sy, sw, sh, 0, 0, W, photoH)
+  if (a.photo) {
+    const photo = a.photo
+    const photoH = Math.round(Math.min(W * 1.25, (W * photo.naturalHeight) / photo.naturalWidth))
+    if (draw) {
+      const srcRatio = photo.naturalWidth / photo.naturalHeight
+      const dstRatio = W / photoH
+      let sw = photo.naturalWidth, sh = photo.naturalHeight, sx = 0, sy = 0
+      if (srcRatio > dstRatio) { sw = sh * dstRatio; sx = (photo.naturalWidth - sw) / 2 }
+      else { sh = sw / dstRatio; sy = (photo.naturalHeight - sh) / 2 }
+      ctx.drawImage(photo, sx, sy, sw, sh, 0, 0, W, photoH)
+    }
+    y = photoH + Math.round(56 * k)
   }
-  y = photoH + Math.round(56 * k)
 
   const block = (text: string, font: string, color: string, size: number, gapAfter: number, indent = 0, prefix = '') => {
     ctx.font = font
@@ -105,6 +120,8 @@ function layout(ctx: CanvasRenderingContext2D, r: ShareableRecipe, a: Assets, k:
     block(`🥗 Nutrition (per serving, estimate): ${r.nutrition}`, `${s}px ${SANS}`, SOFT, s, Math.round(20 * k))
   }
 
+  if (!footer) return y + Math.round(24 * k)
+
   // Footer: logo + name + link on the left, QR on the right.
   y += Math.round(24 * k)
   if (draw) { ctx.fillStyle = 'rgba(216,171,92,0.45)'; ctx.fillRect(PAD, y, textW, 2) }
@@ -143,40 +160,89 @@ function layout(ctx: CanvasRenderingContext2D, r: ShareableRecipe, a: Assets, k:
   return y
 }
 
-// Returns a JPEG of the full share card, or null if the photo cannot be read.
-export async function renderRecipeShareCard(recipe: ShareableRecipe, photo: Blob, fileName: string): Promise<File | null> {
-  const photoUrl = URL.createObjectURL(photo)
+// Draws the recipe (and footer) onto a new canvas, shrinking the type for
+// long recipes instead of cutting them off.
+function drawCard(recipe: ShareableRecipe, assets: Assets, footer: boolean): HTMLCanvasElement | null {
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  let k = 1
+  let h = layout(ctx, recipe, assets, k, false, footer)
+  for (let i = 0; i < 4 && h > MAX_H; i++) {
+    k *= 0.85
+    h = layout(ctx, recipe, assets, k, false, footer)
+  }
+  canvas.width = W
+  canvas.height = Math.min(h, MAX_H)
+  ctx.fillStyle = PLUM
+  ctx.fillRect(0, 0, W, canvas.height)
+  ctx.textBaseline = 'alphabetic'
+  layout(ctx, recipe, assets, k, true, footer)
+  return canvas
+}
+
+// The recipe on its own (no photo, no footer), for the video's recipe frame.
+export async function renderRecipePanel(recipe: ShareableRecipe, brand: BrandAssets): Promise<HTMLCanvasElement | null> {
+  if (document.fonts?.ready) await document.fonts.ready.catch(() => undefined)
+  return drawCard(recipe, { ...brand, photo: null }, false)
+}
+
+// Full-frame ShareChef ending: logo, name, App Store link and a big QR code.
+export function drawBrandFrame(ctx: CanvasRenderingContext2D, w: number, h: number, brand: BrandAssets): void {
+  const u = w / 1080
+  ctx.fillStyle = PLUM
+  ctx.fillRect(0, 0, w, h)
+  ctx.textAlign = 'center'
+  let y = h * 0.16
+  if (brand.logo) {
+    const s = 260 * u
+    ctx.save()
+    ctx.beginPath()
+    if (typeof ctx.roundRect === 'function') ctx.roundRect(w / 2 - s / 2, y, s, s, 56 * u)
+    else ctx.rect(w / 2 - s / 2, y, s, s)
+    ctx.clip()
+    ctx.drawImage(brand.logo, w / 2 - s / 2, y, s, s)
+    ctx.restore()
+    y += s + 90 * u
+  }
+  ctx.fillStyle = INK
+  ctx.font = `600 ${84 * u}px ${SERIF}`
+  ctx.fillText('ShareChef AI', w / 2, y)
+  y += 70 * u
+  ctx.fillStyle = SOFT
+  ctx.font = `${40 * u}px ${SANS}`
+  ctx.fillText('Cook this hands-free with Micheli', w / 2, y)
+  y += 56 * u
+  ctx.fillText('Free on the App Store', w / 2, y)
+  y += 60 * u
+  const q = Math.min(440 * u, h - y - 200 * u)
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(w / 2 - q / 2 - 18 * u, y, q + 36 * u, q + 36 * u)
+  ctx.drawImage(brand.qr, w / 2 - q / 2, y + 18 * u, q, q)
+  y += q + 36 * u + 70 * u
+  ctx.fillStyle = GOLD
+  ctx.font = `${30 * u}px ${SANS}`
+  ctx.fillText('apps.apple.com/app/sharechef-ai-hands-free-chef', w / 2, y, w - 80 * u)
+  ctx.textAlign = 'left'
+}
+
+// A JPEG of the full share card: photo (when there is one), the recipe, and
+// the ShareChef footer. Null only if drawing fails.
+export async function renderRecipeShareCard(recipe: ShareableRecipe, photo: Blob | null, fileName: string): Promise<File | null> {
+  const photoUrl = photo ? URL.createObjectURL(photo) : null
   try {
-    const [photoImg, logo, qr] = await Promise.all([
-      loadImage(photoUrl),
-      loadImage('/sharechef-logo.png').catch(() => null), // the card still works without the logo
-      QRCode.toDataURL(APP_STORE_LINK, { margin: 0, width: 400, color: { dark: PLUM, light: '#ffffff' } }).then(loadImage),
+    const [photoImg, brand] = await Promise.all([
+      photoUrl ? loadImage(photoUrl) : Promise.resolve(null),
+      loadBrandAssets(),
     ])
-    const assets: Assets = { photo: photoImg, logo, qr }
-    const canvas = document.createElement('canvas')
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return null
     if (document.fonts?.ready) await document.fonts.ready.catch(() => undefined)
-
-    // Long recipes shrink the type instead of getting cut off.
-    let k = 1
-    let h = layout(ctx, recipe, assets, k, false)
-    for (let i = 0; i < 4 && h > MAX_H; i++) {
-      k *= 0.85
-      h = layout(ctx, recipe, assets, k, false)
-    }
-    canvas.width = W
-    canvas.height = Math.min(h, MAX_H)
-    ctx.fillStyle = PLUM
-    ctx.fillRect(0, 0, W, canvas.height)
-    ctx.textBaseline = 'alphabetic'
-    layout(ctx, recipe, assets, k, true)
-
+    const canvas = drawCard(recipe, { ...brand, photo: photoImg }, true)
+    if (!canvas) return null
     const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/jpeg', 0.9))
     return blob ? new File([blob], fileName, { type: 'image/jpeg' }) : null
   } catch {
     return null
   } finally {
-    URL.revokeObjectURL(photoUrl)
+    if (photoUrl) URL.revokeObjectURL(photoUrl)
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabaseClient'
 import type { Recipe } from '../types/recipe'
@@ -8,6 +8,8 @@ import { dishPhotoFile, dishPhotoUrl, removeDishPhoto } from '../lib/dishPhoto'
 import { DishPhotoPrompt } from '../components/DishPhotoPrompt'
 import { APP_STORE_LINK, recipeShareText } from '../lib/recipeShareText'
 import { renderRecipeShareCard } from '../lib/recipeShareCard'
+import { MAX_CLIP_SECONDS, canMakeShareVideo, makeRecipeShareVideo } from '../lib/recipeShareVideo'
+import type { VideoProgress } from '../lib/recipeShareVideo'
 
 export function SavedDetailPage() {
   const { id } = useParams()
@@ -51,17 +53,56 @@ export function SavedDetailPage() {
     return () => { live = false }
   }, [photoPath, recipeTitle, photoVersion])
 
+  // Every photo share is the card: with the dish photo when there is one,
+  // otherwise the recipe alone. Either way it carries the logo, link and QR.
   useEffect(() => {
     setShareCard(null)
-    if (!photoFile || !recipe) return
+    if (!recipe) return
+    if (recipe.photo_path && !photoFile) return // wait for the photo instead of sharing without it
     let live = true
-    renderRecipeShareCard(recipe, photoFile, photoFile.name).then((f) => { if (live) setShareCard(f) })
+    const name = photoFile?.name ?? `${recipe.title.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'my-dish'}.jpg`
+    renderRecipeShareCard(recipe, photoFile, name).then((f) => { if (live) setShareCard(f) })
     return () => { live = false }
   }, [photoFile, recipe])
 
-  // Only when the device can put a photo in the share sheet.
-  const canSharePhoto = (file: File | null): file is File =>
+  // Only when the device can put this file in the share sheet.
+  const canShareFile = (file: File | null): file is File =>
     !!file && typeof navigator !== 'undefined' && !!navigator.canShare && navigator.canShare({ files: [file] })
+
+  // ── video share ──
+  const [shareMode, setShareMode] = useState<'photo' | 'video'>('photo')
+  const videoInputRef = useRef<HTMLInputElement | null>(null)
+  const [clip, setClip] = useState<File | null>(null)
+  const [shareVideo, setShareVideo] = useState<File | null>(null)
+  const [videoProgress, setVideoProgress] = useState<VideoProgress | null>(null)
+  const [videoError, setVideoError] = useState<string | null>(null)
+  const videoSupported = canMakeShareVideo()
+  const shareVideoUrl = useMemo(() => (shareVideo ? URL.createObjectURL(shareVideo) : null), [shareVideo])
+  useEffect(() => () => { if (shareVideoUrl) URL.revokeObjectURL(shareVideoUrl) }, [shareVideoUrl])
+
+  const onPickClip = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] ?? null
+    e.target.value = ''
+    setClip(f)
+    setShareVideo(null)
+    setVideoError(null)
+  }
+
+  // Started from a tap so iOS lets the clip play while it is recorded.
+  const onMakeVideo = async () => {
+    if (!clip || !recipe) return
+    setVideoError(null)
+    setShareVideo(null)
+    setVideoProgress({ phase: 'clip', fraction: 0 })
+    try {
+      const base = recipe.title.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'my-dish'
+      setShareVideo(await makeRecipeShareVideo(clip, recipe, base, setVideoProgress))
+    } catch (err) {
+      setVideoError(err instanceof Error ? err.message : 'Could not make the video. Try again.')
+    } finally {
+      setVideoProgress(null)
+    }
+  }
 
   const onDelete = async () => {
     if (!id) return
@@ -99,7 +140,7 @@ export function SavedDetailPage() {
       // One share: the card image (photo + recipe + logo + link + QR), the
       // full recipe text, and the App Store link. Apps that keep text get the
       // tappable link too; Messages turns it into a card with the app icon.
-      await navigator.share({ files: [shareCard ?? file], title: recipe?.title ?? 'ShareChef AI', text: fullRecipeText, url: APP_LINK })
+      await navigator.share({ files: [file], title: recipe?.title ?? 'ShareChef AI', text: fullRecipeText, url: APP_LINK })
     } catch {
       return // user dismissed the share sheet
     }
@@ -110,11 +151,12 @@ export function SavedDetailPage() {
     )
   }
 
-  // Channel buttons: with a photo, open the share sheet; without, the old link.
+  // Channel buttons: open the share sheet with the card; the old web link
+  // only when this device cannot share files.
   const onChannel = (channel: ShareChannel, label: string, fallback: () => void) => (e: React.MouseEvent) => {
-    if (canSharePhoto(photoFile)) {
+    if (canShareFile(shareCard)) {
       e.preventDefault()
-      void sharePhoto(channel, photoFile, label)
+      void sharePhoto(channel, shareCard, label)
       return
     }
     fallback()
@@ -145,7 +187,7 @@ export function SavedDetailPage() {
 
   const onShare = async () => {
     setShareMsg(null)
-    if (canSharePhoto(photoFile)) return sharePhoto('native', photoFile)
+    if (canShareFile(shareCard)) return sharePhoto('native', shareCard)
     try {
       if (typeof navigator !== 'undefined' && navigator.share) {
         await navigator.share({ title: recipe?.title ?? 'ShareChef AI', text: fullRecipeText })
@@ -215,8 +257,50 @@ export function SavedDetailPage() {
 
           <div className="share-block stack" style={{ borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 12 }}>
             <div className="section-title">Share this creation</div>
+            <div className="row" style={{ gap: 8 }} role="tablist" aria-label="Share as">
+              <button type="button" role="tab" aria-selected={shareMode === 'photo'} className={shareMode === 'photo' ? 'btn btn-primary' : 'btn btn-ghost'} onClick={() => setShareMode('photo')}>📸 Photo</button>
+              <button type="button" role="tab" aria-selected={shareMode === 'video'} className={shareMode === 'video' ? 'btn btn-primary' : 'btn btn-ghost'} onClick={() => setShareMode('video')}>🎬 Video</button>
+            </div>
+            {shareMode === 'video' ? (
+              <div className="stack" style={{ gap: 8 }}>
+                <div className="muted">
+                  Pick a video of your cook (up to {MAX_CLIP_SECONDS} seconds is used). ShareChef adds the full recipe and an ending with the ShareChef logo, App Store link and QR code.
+                </div>
+                {!videoSupported ? (
+                  <div className="alert alert-error">This phone can't make share videos yet. Share a photo instead.</div>
+                ) : (
+                  <>
+                    <input ref={videoInputRef} type="file" accept="video/*" hidden onChange={onPickClip} />
+                    <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                      <button type="button" className="btn btn-ghost" disabled={!!videoProgress} onClick={() => videoInputRef.current?.click()}>
+                        {clip ? 'Choose another video' : 'Choose a video'}
+                      </button>
+                      {clip && !shareVideo && (
+                        <button type="button" className="btn btn-primary" disabled={!!videoProgress} onClick={() => { void onMakeVideo() }}>
+                          {videoProgress ? 'Making your video…' : 'Make my share video'}
+                        </button>
+                      )}
+                      {shareVideo && (
+                        <button type="button" className="btn btn-primary" onClick={() => { void sharePhoto('native', shareVideo) }}>
+                          📤 Share video
+                        </button>
+                      )}
+                    </div>
+                    {videoProgress && (
+                      <div className="muted">
+                        {videoProgress.phase === 'clip' ? 'Adding your clip' : videoProgress.phase === 'recipe' ? 'Adding the recipe' : 'Adding the ShareChef ending'}
+                        … {Math.round(videoProgress.fraction * 100)}%. Keep this screen open.
+                      </div>
+                    )}
+                    {shareVideoUrl && <video src={shareVideoUrl} controls playsInline style={{ width: '100%', maxHeight: 420, borderRadius: 12 }} />}
+                  </>
+                )}
+                {videoError && <div className="alert alert-error">{videoError}</div>}
+              </div>
+            ) : (
+            <>
             <div className="muted" style={{ marginTop: -4, marginBottom: 6 }}>
-              {photoUrl ? 'Your photo and the full recipe go out together 🍳' : 'Post to Instagram, TikTok, and more 🍳'}
+              {photoUrl ? 'Your photo, the full recipe and the ShareChef link go out together 🍳' : 'The full recipe and the ShareChef link go out together 🍳'}
             </div>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
               <button type="button" className="btn btn-primary" onClick={onShare}>📤 Share</button>
@@ -228,6 +312,8 @@ export function SavedDetailPage() {
               <button type="button" className="btn btn-ghost" onClick={onChannel('tiktok', 'TikTok', () => copyAndOpen('tiktok', 'https://www.tiktok.com/'))}>TikTok</button>
               <button type="button" className="btn btn-ghost" onClick={onChannel('youtube', 'YouTube', () => copyAndOpen('youtube', 'https://www.youtube.com/'))}>YouTube</button>
             </div>
+            </>
+            )}
             {shareMsg && <div className="muted" style={{ marginTop: 4 }}>{shareMsg}</div>}
           </div>
 
