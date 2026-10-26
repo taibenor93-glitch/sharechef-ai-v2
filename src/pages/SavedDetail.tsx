@@ -6,7 +6,8 @@ import { recordShare } from '../lib/shares'
 import type { ShareChannel } from '../lib/shares'
 import { dishPhotoFile, dishPhotoUrl, removeDishPhoto } from '../lib/dishPhoto'
 import { DishPhotoPrompt } from '../components/DishPhotoPrompt'
-import { recipeShareText } from '../lib/recipeShareText'
+import { APP_STORE_LINK, recipeShareText } from '../lib/recipeShareText'
+import { renderRecipeShareCard } from '../lib/recipeShareCard'
 
 export function SavedDetailPage() {
   const { id } = useParams()
@@ -21,6 +22,9 @@ export function SavedDetailPage() {
   // so there is no time to download the photo after the button is pressed.
   const [photoFile, setPhotoFile] = useState<File | null>(null)
   const [photoVersion, setPhotoVersion] = useState(0) // bumps when a photo is replaced at the same path
+  // The photo with the whole recipe, logo, link and QR drawn into it. Built
+  // ahead of time for the same reason as photoFile.
+  const [shareCard, setShareCard] = useState<File | null>(null)
 
   useEffect(() => {
     const run = async () => {
@@ -47,6 +51,14 @@ export function SavedDetailPage() {
     return () => { live = false }
   }, [photoPath, recipeTitle, photoVersion])
 
+  useEffect(() => {
+    setShareCard(null)
+    if (!photoFile || !recipe) return
+    let live = true
+    renderRecipeShareCard(recipe, photoFile, photoFile.name).then((f) => { if (live) setShareCard(f) })
+    return () => { live = false }
+  }, [photoFile, recipe])
+
   // Only when the device can put a photo in the share sheet.
   const canSharePhoto = (file: File | null): file is File =>
     !!file && typeof navigator !== 'undefined' && !!navigator.canShare && navigator.canShare({ files: [file] })
@@ -62,7 +74,7 @@ export function SavedDetailPage() {
     nav('/saved', { replace: true })
   }
 
-  const APP_LINK = 'https://apps.apple.com/app/sharechef-ai/id6787142176'
+  const APP_LINK = APP_STORE_LINK
   const shareText = recipe
     ? `${recipe.title} — a dish I made with Micheli on ShareChef AI 🍳👨‍🍳`
     : 'Cook with Micheli on ShareChef AI 🍳'
@@ -84,7 +96,10 @@ export function SavedDetailPage() {
     setShareMsg(null)
     navigator.clipboard?.writeText(fullRecipeText).catch(() => {}) // not awaited: keep the tap fresh for share()
     try {
-      await navigator.share({ files: [file], title: recipe?.title ?? 'ShareChef AI', text: fullRecipeText })
+      // One share: the card image (photo + recipe + logo + link + QR), the
+      // full recipe text, and the App Store link. Apps that keep text get the
+      // tappable link too; Messages turns it into a card with the app icon.
+      await navigator.share({ files: [shareCard ?? file], title: recipe?.title ?? 'ShareChef AI', text: fullRecipeText, url: APP_LINK })
     } catch {
       return // user dismissed the share sheet
     }
